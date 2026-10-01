@@ -35,3 +35,10 @@ def test_hosted_backend_needs_a_key():
 
 def test_api_keys_parsing():
     assert Settings(_env_file=None, gateway_api_keys=" a, b ,").api_keys == {"a", "b"}
+
+
+def test_multiple_ollama_nodes():
+    settings = Settings(_env_file=None, ollama_base_url="http://a:11434, http://b:11435/v1")
+    backends = settings.backend_configs()
+    assert [b.name for b in backends] == ["ollama", "ollama-2"]
+    assert [b.base_url for b in backends] == ["http://a:11434/v1", "http://b:11435/v1"]

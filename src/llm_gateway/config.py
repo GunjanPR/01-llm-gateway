@@ -105,11 +105,12 @@ class Settings(BaseSettings):
                     timeout_seconds=self.backend_timeout_seconds,
                 )
             )
-        if self.ollama_base_url:
+        # Several Ollama nodes may be listed, comma-separated: ollama, ollama-2, ...
+        for i, url in enumerate(_split(self.ollama_base_url), start=1):
             backends.append(
                 BackendConfig(
-                    name="ollama",
-                    base_url=f"{self.ollama_base_url.rstrip('/').removesuffix('/v1')}/v1",
+                    name="ollama" if i == 1 else f"ollama-{i}",
+                    base_url=f"{url.rstrip('/').removesuffix('/v1')}/v1",
                     models=parse_models(self.ollama_models),
                     quality=self.ollama_quality,
                     timeout_seconds=self.backend_timeout_seconds,
