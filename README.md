@@ -144,6 +144,7 @@ curl http://localhost:8000/v1/chat/completions \
 Or use the OpenAI SDK:
 ```python
 from openai import OpenAI
+
 client = OpenAI(base_url="http://localhost:8000/v1", api_key="<gateway key>")
 client.chat.completions.create(model="llama3.2", messages=[{"role": "user", "content": "Hi"}])
 ```
