@@ -199,12 +199,12 @@ Milestones follow [SHARED_STANDARDS.md](../SHARED_STANDARDS.md). Each one has a 
 ### M1: Scaffold & baseline
 - [x] Repo scaffold: `pyproject.toml`, Makefile, `.gitignore`, `.env.example`
 - [x] Smoke test passes (`make test`)
-- [ ] Baseline verified live: passthrough `/v1/chat/completions` to Ollama
+- [x] Baseline verified live: passthrough `/v1/chat/completions` to Ollama (`llama3.2`, RTX 4050)
 
 ### M2: Core functionality
 - [x] OpenAI-compatible chat + embeddings routes with SSE streaming
 - [x] API-key auth
-- [x] One adapter for every OpenAI-compatible backend (Ollama, vLLM, hosted)
+- [x] One adapter for every OpenAI-compatible backend (Ollama, vLLM, hosted); several Ollama nodes via a comma-separated `OLLAMA_BASE_URL`
 - [x] Routing policy (cost / latency / quality) with retries, fallback and circuit breaker
 - [x] Model aliasing across providers
 - [ ] Guardrails: PII redaction, prompt-injection checks
@@ -216,11 +216,12 @@ Milestones follow [SHARED_STANDARDS.md](../SHARED_STANDARDS.md). Each one has a 
 - [ ] Usage / cost ledger per tenant (PostgreSQL)
 
 ### M4: Evaluation & testing
-- [x] Unit tests for router, limiter, cache, config and API (37 tests)
+- [x] Unit tests for router, limiter, cache, config and API (38 tests)
 - [x] Integration tests against the real stack written (`tests/integration/`)
-- [ ] Integration tests run green against real Ollama + Redis
+- [x] Integration tests run green against real Ollama + Redis (5/5)
 - [x] Benchmark harness (`scripts/bench.py`) with a direct-to-backend baseline
-- [ ] Benchmarks run; failover under an injected backend failure measured
+- [x] Failover harness (`scripts/failover.py`) for killing a backend under load
+- [ ] Benchmarks run on mains power; failover measured
 
 ### M5: Observability / monitoring
 - [x] Prometheus metrics: TTFT, tokens/sec, p50/p95 latency, cache hit rate, cost
@@ -230,7 +231,8 @@ Milestones follow [SHARED_STANDARDS.md](../SHARED_STANDARDS.md). Each one has a 
 
 ### M6: Containerization & CI/CD
 - [x] Dockerfile and `docker-compose.yml` (gateway, Redis, Prometheus, Grafana; optional Ollama profile)
-- [ ] `docker compose up` verified locally
+- [x] `make up` verified locally (Redis, Prometheus scraping the gateway, Grafana dashboard provisioned)
+- [ ] `make up-all` (gateway container → host Ollama) verified locally
 - [x] GitHub Actions: lint, test, image build and container smoke test
 - [ ] Kubernetes manifests (optional)
 
@@ -253,6 +255,7 @@ Milestones follow [SHARED_STANDARDS.md](../SHARED_STANDARDS.md). Each one has a 
 │   └── config.py          # settings + backend list
 ├── tests/                 # unit tests; tests/integration/ = live stack
 ├── scripts/bench.py       # load test / benchmark
+├── scripts/failover.py    # availability while a backend is killed
 ├── deploy/                # Prometheus config, Grafana provisioning + dashboard
 ├── .github/workflows/ci.yml
 ├── Dockerfile
