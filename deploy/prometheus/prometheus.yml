@@ -1,0 +1,15 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # Gateway running inside docker compose
+  - job_name: llm-gateway
+    static_configs:
+      - targets: ["gateway:8000"]
+        labels: {deployment: compose}
+  # Gateway running natively on the host (`make run`)
+  - job_name: llm-gateway-host
+    static_configs:
+      - targets: ["host.docker.internal:8000"]
+        labels: {deployment: host}

@@ -1,7 +1,8 @@
 # Windows: install make with `choco install make`, or run from Git Bash.
 PYTHON ?= python
+KEY ?=
 
-.PHONY: install lint format test run
+.PHONY: install lint format test test-integration run up up-all down logs bench
 
 install:
 	$(PYTHON) -m pip install --upgrade pip
@@ -18,5 +19,31 @@ format:
 test:
 	$(PYTHON) -m pytest
 
+# Needs the stack running (make up + make run) and GATEWAY_TEST_KEY set
+test-integration:
+	$(PYTHON) -m pytest -m integration
+
+# Gateway on the host (talks to native Ollama on :11434)
 run:
-	$(PYTHON) -m uvicorn llm_gateway.main:app --reload --host 0.0.0.0 --port 8000
+	$(PYTHON) -m llm_gateway --reload
+
+# Redis + Prometheus + Grafana in Docker, for use with `make run`
+up:
+	docker compose up -d redis prometheus grafana
+
+# Everything in Docker, including the gateway
+up-all:
+	docker compose up -d --build
+
+down:
+	docker compose down
+
+logs:
+	docker compose logs -f --tail=100
+
+# Baseline (direct to Ollama) vs gateway, cache bypassed. Usage: make bench KEY=<gateway key>
+bench:
+	$(PYTHON) scripts/bench.py --label direct --base-url http://localhost:11434/v1 --requests 50 --concurrency 4
+	$(PYTHON) scripts/bench.py --label gateway --base-url http://localhost:8000/v1 --api-key $(KEY) --requests 50 --concurrency 4 --no-cache
+	$(PYTHON) scripts/bench.py --label gateway-cache --base-url http://localhost:8000/v1 --api-key $(KEY) --requests 50 --concurrency 4 --repeat-ratio 0.5
+	$(PYTHON) scripts/bench.py --label gateway-stream --base-url http://localhost:8000/v1 --api-key $(KEY) --requests 30 --concurrency 2 --stream --no-cache

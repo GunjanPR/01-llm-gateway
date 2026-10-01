@@ -49,3 +49,4 @@ models/
 *.safetensors
 *.bin
 loadtest-results/
+results/

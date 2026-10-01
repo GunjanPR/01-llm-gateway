@@ -17,15 +17,13 @@ dependencies = [
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
     "prometheus-client>=0.20",
-    "opentelemetry-sdk>=1.25",
-    "opentelemetry-instrumentation-fastapi>=0.46b0",
-    "tiktoken>=0.7",
 ]
 
 [project.optional-dependencies]
 dev = [
     "ruff>=0.6",
     "pytest>=8.0",
+    "fakeredis>=2.23",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -46,7 +44,7 @@ known-first-party = ["llm_gateway"]
 minversion = "8.0"
 testpaths = ["tests"]
 pythonpath = ["src"]
-addopts = "-ra -q --strict-markers"
+addopts = "-ra -q --strict-markers -m \"not integration\""
 markers = [
     "integration: tests that need running external services (deselect with '-m \"not integration\"')",
 ]
