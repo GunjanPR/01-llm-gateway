@@ -182,6 +182,25 @@ This runs the same workload four times and appends one JSON line per run to
 Each run records p50/p95/p99 latency, TTFT, throughput and tokens/s. See
 [scripts/bench.py](scripts/bench.py) for every option.
 
+### Reproduce on a free Kaggle GPU
+[notebooks/kaggle_benchmark.ipynb](notebooks/kaggle_benchmark.ipynb) runs the real stack
+(Ollama, Redis and the gateway) on a Kaggle T4. It runs the same benchmarks as above
+(direct vs gateway, cache effect, streaming TTFT) plus a failover test where a second Ollama
+node is killed mid-run. Results are written to `/kaggle/working/results/`: `summary.csv`,
+`headline.json`, the raw `bench.jsonl` / `failover.jsonl`, and a metrics snapshot.
+
+1. Create a free account at https://www.kaggle.com and verify your phone number. Kaggle
+   only allows internet access from notebooks on verified accounts.
+2. **Create → New Notebook → File → Import Notebook**, then upload `kaggle_benchmark.ipynb`.
+3. In the notebook's right-hand panel, set **Accelerator: GPU T4 x2** and turn **Internet on**.
+4. Make the code available to the notebook in one of two ways:
+   - Make this GitHub repo public. The notebook clones it.
+   - Or upload a zip of the repo as a Kaggle **Dataset** and attach it through **Add Input**.
+     The notebook finds it under `/kaggle/input/`.
+
+   Don't paste GitHub tokens into the notebook.
+5. **Run All** (about 15–25 minutes), then download `results/` from the **Output** tab.
+
 ## Evaluation & Results
 
 - **Baseline:** the same requests sent directly to Ollama, with no gateway.
@@ -189,8 +208,14 @@ Each run records p50/p95/p99 latency, TTFT, throughput and tokens/s. See
   hit rate and latency on hits, cost per 1K tokens, and availability when a backend fails.
 - **Method:** `scripts/bench.py` with a fixed seed and prompt set. Failover is tested by
   stopping a backend during a run.
-- **Results:** *not measured yet.* Real numbers on the RTX 4050 laptop GPU will go here
-  once the stack is running.
+- **Hardware:**
+  - *Local:* Acer Nitro V 15, RTX 4050 Laptop GPU (6 GB). It runs on USB-C power, so the
+    GPU is held to a **20 W power limit** (default 60 W, maximum 75 W). Comparisons between
+    direct and gateway stay valid because both run under the same limit, but absolute
+    tokens/s are below what this GPU can do.
+  - *Full-speed, reproducible:* the Kaggle notebook above.
+- **Results:** *not finalized yet.* The local power-capped runs and the Kaggle numbers will
+  go here.
 
 ## Milestones
 
@@ -221,7 +246,8 @@ Milestones follow [SHARED_STANDARDS.md](../SHARED_STANDARDS.md). Each one has a 
 - [x] Integration tests run green against real Ollama + Redis (5/5)
 - [x] Benchmark harness (`scripts/bench.py`) with a direct-to-backend baseline
 - [x] Failover harness (`scripts/failover.py`) for killing a backend under load
-- [ ] Benchmarks run on mains power; failover measured
+- [x] Kaggle notebook to reproduce benchmarks + failover on a free T4 GPU
+- [ ] Benchmarks run locally (USB-C, 20 W cap) and on Kaggle; failover measured
 
 ### M5: Observability / monitoring
 - [x] Prometheus metrics: TTFT, tokens/sec, p50/p95 latency, cache hit rate, cost
@@ -256,6 +282,7 @@ Milestones follow [SHARED_STANDARDS.md](../SHARED_STANDARDS.md). Each one has a 
 ├── tests/                 # unit tests; tests/integration/ = live stack
 ├── scripts/bench.py       # load test / benchmark
 ├── scripts/failover.py    # availability while a backend is killed
+├── notebooks/kaggle_benchmark.ipynb  # reproducible GPU benchmark on Kaggle
 ├── deploy/                # Prometheus config, Grafana provisioning + dashboard
 ├── .github/workflows/ci.yml
 ├── Dockerfile
