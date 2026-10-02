@@ -59,7 +59,7 @@ def setup_tracing(
     _provider = provider
 
     FastAPIInstrumentor.instrument_app(
-        app, tracer_provider=provider, excluded_urls="health,metrics"
+        app, tracer_provider=provider, excluded_urls="health,livez,readyz,metrics"
     )
     for client in clients:
         HTTPXClientInstrumentor.instrument_client(client, tracer_provider=provider)

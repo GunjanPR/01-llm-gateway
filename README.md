@@ -285,6 +285,7 @@ client.chat.completions.create(model="llama3.2", messages=[{"role": "user", "con
 |---|---|
 | http://localhost:8000/health | Redis and backend reachability, circuit-breaker state |
 | http://localhost:8000/metrics | Prometheus metrics |
+| http://localhost:8000/livez, /readyz | Kubernetes liveness (process up) and readiness (Redis reachable) |
 | http://localhost:8000/docs | OpenAPI UI |
 | http://localhost:9090 | Prometheus |
 | http://localhost:8000/v1/usage | Your API key's usage per model (needs `LEDGER_DATABASE_URL`) |
@@ -442,7 +443,7 @@ Milestones follow [SHARED_STANDARDS.md](../SHARED_STANDARDS.md). Each one has a 
 - [x] Usage / cost ledger per tenant (PostgreSQL, batched background writes, `/v1/usage`)
 
 ### M4: Evaluation & testing
-- [x] Unit tests for router, limiter, caches, config, guardrails and API (90 tests)
+- [x] Unit tests for router, limiter, caches, config, guardrails and API (91 tests)
 - [x] Integration tests against the real stack written (`tests/integration/`)
 - [x] Integration tests run green against real Ollama + Redis (8/8)
 - [x] Benchmark harness (`scripts/bench.py`) with a direct-to-backend baseline
@@ -463,7 +464,8 @@ Milestones follow [SHARED_STANDARDS.md](../SHARED_STANDARDS.md). Each one has a 
 - [x] `make up` verified locally (Redis, Prometheus scraping the gateway, Grafana dashboard provisioned)
 - [x] `make up-all` verified locally (gateway container → host Ollama, healthy, real completion)
 - [x] GitHub Actions: lint, test, image build and container smoke test
-- [ ] Kubernetes manifests (optional)
+- [x] Kubernetes manifests (Kustomize: gateway Deployment + HPA + PDB, Redis/Postgres StatefulSets, Jaeger), schema-validated in CI with kubeconform
+- [ ] Deployed and verified on a local cluster
 
 ### M7: Docs, benchmarks & demo
 - [x] README with measured results against the baseline (local, 20 W cap)
@@ -496,6 +498,7 @@ Milestones follow [SHARED_STANDARDS.md](../SHARED_STANDARDS.md). Each one has a 
 ├── eval/                  # labelled prompt pairs (tuning + held-out)
 ├── notebooks/kaggle_benchmark.ipynb  # reproducible GPU benchmark on Kaggle
 ├── deploy/                # Prometheus config, Grafana provisioning + dashboard
+├── k8s/                   # Kubernetes manifests (kubectl apply -k k8s/), see k8s/README.md
 ├── .github/workflows/ci.yml
 ├── Dockerfile
 ├── docker-compose.yml

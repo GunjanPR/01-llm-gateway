@@ -203,3 +203,9 @@ def test_global_cache_scope_shares_entries(client_factory):
     client.post("/v1/chat/completions", json=CHAT, headers={"Authorization": "Bearer k1"})
     resp = client.post("/v1/chat/completions", json=CHAT, headers={"Authorization": "Bearer k2"})
     assert resp.headers["x-gateway-cache"] == "HIT"
+
+
+def test_liveness_and_readiness(client_factory):
+    client = client_factory([make_backend("a", Upstream(fail(500)))])
+    assert client.get("/livez").json() == {"status": "ok"}
+    assert client.get("/readyz").status_code == 200  # backends down doesn't matter

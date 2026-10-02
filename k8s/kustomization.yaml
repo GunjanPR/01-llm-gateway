@@ -1,0 +1,15 @@
+# kubectl apply -k k8s/   (see k8s/README.md)
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: llm-gateway
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - redis.yaml
+  - postgres.yaml
+  - jaeger.yaml
+  - gateway.yaml
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: llm-gateway
+    includeSelectors: false

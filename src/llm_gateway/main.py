@@ -297,6 +297,20 @@ def create_app(
             ],
         }
 
+    @app.get("/livez")
+    async def livez() -> dict[str, str]:
+        """Liveness: the process is serving. No dependency checks (Kubernetes liveness)."""
+        return {"status": "ok"}
+
+    @app.get("/readyz")
+    async def readyz() -> Response:
+        """Readiness: Redis answers. Backends are not required (the router handles them)."""
+        try:
+            await redis.ping()
+        except Exception as exc:  # not ready: take this pod out of the Service
+            return JSONResponse({"status": "unavailable", "redis": str(exc)}, 503)
+        return JSONResponse({"status": "ok"})
+
     @app.get("/metrics")
     async def prometheus_metrics() -> Response:
         refresh_backend_gauges()

@@ -31,3 +31,14 @@ jobs:
           for i in $(seq 1 20); do curl -fs localhost:8000/health && break; sleep 1; done
           curl -fs localhost:8000/metrics | grep -q llmgw_requests_total
           test "$(curl -s -o /dev/null -w '%{http_code}' localhost:8000/v1/models)" = "401"
+
+  k8s-manifests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Render with kustomize
+        run: kubectl kustomize k8s/ > rendered.yaml
+      - name: Validate against Kubernetes schemas
+        run: |
+          docker run --rm -v "$PWD:/work" ghcr.io/yannh/kubeconform:v0.6.7 \
+            -strict -summary -kubernetes-version 1.31.0 /work/rendered.yaml

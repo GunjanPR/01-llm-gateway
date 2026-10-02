@@ -1,0 +1,24 @@
+# Non-secret settings. Secrets (API keys, DB password) live in the `llm-gateway-secrets`
+# Secret, created from your .env; see k8s/README.md. Never commit real secrets.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llm-gateway-config
+data:
+  LOG_LEVEL: info
+  REDIS_URL: redis://redis:6379/0
+  # Ollama runs on the host. Docker Desktop and kind clusters reach the host at this name.
+  OLLAMA_BASE_URL: http://host.docker.internal:11434
+  OLLAMA_MODELS: llama3.2,llama3.2:1b,nomic-embed-text
+  DEFAULT_MODEL: llama3.2
+  ROUTING_POLICY: cost
+  RATE_LIMIT_RPM: "60"
+  CACHE_MODE: all
+  CACHE_SCOPE: tenant
+  SEMANTIC_CACHE_ENABLED: "true"
+  GUARDRAIL_PII: redact
+  GUARDRAIL_OUTPUT_PII: redact
+  GUARDRAIL_INJECTION: flag
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+  OTEL_SERVICE_NAME: llm-gateway
+  PYTHONDONTWRITEBYTECODE: "1"
