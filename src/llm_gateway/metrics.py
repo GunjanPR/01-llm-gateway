@@ -108,6 +108,17 @@ class GatewayMetrics:
             buckets=LATENCY_BUCKETS,
             registry=r,
         )
+        self.ledger_rows = Counter(
+            "llmgw_ledger_rows_total", "Usage rows written to PostgreSQL", registry=r
+        )
+        self.ledger_errors = Counter(
+            "llmgw_ledger_write_errors_total", "Failed ledger batch writes", registry=r
+        )
+        self.ledger_dropped = Counter(
+            "llmgw_ledger_dropped_total",
+            "Usage rows dropped because the queue was full",
+            registry=r,
+        )
         self.cache = Counter("llmgw_cache_requests_total", "Cache lookups", ["result"], registry=r)
         self.backend_errors = Counter(
             "llmgw_backend_errors_total", "Failed backend calls", ["backend", "kind"], registry=r

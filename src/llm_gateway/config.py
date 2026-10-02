@@ -80,6 +80,12 @@ class Settings(BaseSettings):
     hosted_cost_per_1k_output: float = 0.0
     hosted_quality: float = 0.8
 
+    # Usage ledger (PostgreSQL); blank disables
+    ledger_database_url: str = ""
+    ledger_batch_size: int = 200
+    ledger_flush_interval_seconds: float = 1.0
+    ledger_max_queue: int = 10_000
+
     # Semantic cache (needs Redis 8+ / Redis Stack for vector search)
     semantic_cache_enabled: bool = True
     semantic_cache_embed_model: str = "nomic-embed-text"

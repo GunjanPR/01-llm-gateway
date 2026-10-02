@@ -108,3 +108,14 @@ def test_real_semantic_cache_reuses_a_paraphrase(client):
     assert second.json() == first.json()
     third = ask("What is the capital of Spain?")
     assert third.headers["x-gateway-cache"] == "MISS"  # near-miss must not reuse Italy
+
+
+def test_real_usage_ledger_records_requests(client):
+    before = client.get("/v1/usage", params={"days": 1})
+    assert before.status_code == 200, before.text
+    body = chat(f"Reply OK. ({uuid.uuid4()})")
+    resp = client.post("/v1/chat/completions", json=body)
+    assert resp.headers["x-request-id"]
+    after = client.get("/v1/usage", params={"days": 1}).json()
+    assert after["totals"]["requests"] == before.json()["totals"]["requests"] + 1
+    assert after["totals"]["completion_tokens"] > before.json()["totals"]["completion_tokens"]

@@ -10,10 +10,13 @@ services:
         required: false
     environment:
       REDIS_URL: redis://redis:6379/0
+      LEDGER_DATABASE_URL: postgresql://llmgw:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/llmgw
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL_DOCKER:-http://host.docker.internal:11434}
     extra_hosts: ["host.docker.internal:host-gateway"]
     depends_on:
       redis:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
 
   redis:
@@ -23,6 +26,19 @@ services:
     volumes: ["redis-data:/data"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 10
+
+  postgres:
+    image: postgres:16-alpine
+    ports: ["5432:5432"]
+    environment:
+      POSTGRES_USER: llmgw
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: llmgw
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "llmgw", "-d", "llmgw"]
       interval: 5s
       retries: 10
 
@@ -62,6 +78,7 @@ services:
               capabilities: [gpu]
 
 volumes:
+  pgdata:
   redis-data:
   prometheus-data:
   grafana-data:

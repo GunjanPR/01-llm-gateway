@@ -6,8 +6,10 @@ import hmac
 import json
 import logging
 import time
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import Depends, FastAPI, Request
@@ -20,6 +22,7 @@ from llm_gateway.backends import BackendError, OpenAICompatibleBackend
 from llm_gateway.cache import ResponseCache, cache_key, is_cacheable
 from llm_gateway.config import Settings, get_settings
 from llm_gateway.guardrails import GuardrailReport, redact_response, scan_messages
+from llm_gateway.ledger import PostgresStore, UsageEvent, UsageLedger, Writer
 from llm_gateway.metrics import (
     GatewayMetrics,
     cost_usd,
@@ -32,6 +35,9 @@ from llm_gateway.router import Backend, NoBackendAvailable, Router
 from llm_gateway.semantic_cache import RedisVectorIndex, SemanticCache, SemanticLookup, VectorIndex
 
 logger = logging.getLogger("llm_gateway")
+
+# Routes whose requests are written to the usage ledger, and their ledger names.
+LEDGER_ROUTES = {"/v1/chat/completions": "chat", "/v1/embeddings": "embeddings"}
 
 
 class GatewayError(Exception):
@@ -58,6 +64,7 @@ def create_app(
     backends: list[Backend] | None = None,
     redis: Redis | None = None,
     vector_index: VectorIndex | None = None,
+    ledger_writer: Writer | None = None,
 ) -> FastAPI:
     settings = settings or get_settings()
     logging.basicConfig(level=settings.log_level.upper())
@@ -93,13 +100,41 @@ def create_app(
         if settings.semantic_cache_enabled
         else None
     )
+    store = (
+        PostgresStore(settings.ledger_database_url)
+        if settings.ledger_database_url and ledger_writer is None
+        else None
+    )
+    writer = ledger_writer or (store.write if store else None)
+    ledger = (
+        UsageLedger(
+            writer,
+            metrics,
+            batch_size=settings.ledger_batch_size,
+            flush_interval_seconds=settings.ledger_flush_interval_seconds,
+            max_queue=settings.ledger_max_queue,
+        )
+        if writer
+        else None
+    )
     api_keys = settings.api_keys
     if not api_keys:
         logger.warning("GATEWAY_API_KEYS is empty: every /v1 request will be rejected")
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        if store:
+            try:
+                await store.connect()
+            except Exception as exc:  # keep serving; rows queue until the DB is reachable
+                logger.warning("usage ledger database unavailable at startup: %s", exc)
+        if ledger:
+            ledger.start()
         yield
+        if ledger:
+            await ledger.stop()
+        if store:
+            await store.close()
         for backend in backends:
             await backend.aclose()
         await redis.aclose()
@@ -108,6 +143,26 @@ def create_app(
     app.state.settings = settings
     app.state.router = router
     app.state.metrics = metrics
+    app.state.ledger = ledger
+
+    @app.middleware("http")
+    async def request_log(request: Request, call_next):
+        """Tag every response with a request id and write its usage row."""
+        request.state.request_id = uuid.uuid4()
+        start = time.perf_counter()
+        response = await call_next(request)
+        response.headers["x-request-id"] = str(request.state.request_id)
+        usage = getattr(request.state, "usage", None)
+        if ledger and usage is not None and not usage.pop("deferred", False):
+            ledger.record(
+                UsageEvent(
+                    id=request.state.request_id,
+                    status=response.status_code,
+                    latency_ms=(time.perf_counter() - start) * 1000,
+                    **usage,
+                )
+            )
+        return response
 
     @app.exception_handler(GatewayError)
     async def _gateway_error(_: Request, exc: GatewayError) -> JSONResponse:
@@ -125,6 +180,9 @@ def create_app(
         ):
             raise GatewayError(401, "invalid or missing API key", "authentication_error")
         tenant_id = hashlib.sha256(key.encode()).hexdigest()[:12]
+        route = LEDGER_ROUTES.get(request.url.path)
+        if route:
+            request.state.usage = {"tenant": tenant_id, "route": route, "model": "-"}
         result = await limiter.hit(tenant_id)
         if not result.allowed:
             metrics.rate_limited.inc()
@@ -153,7 +211,7 @@ def create_app(
         status = 404 if isinstance(exc, NoBackendAvailable) and not exc.errors else 502
         return GatewayError(status, str(exc), "upstream_error")
 
-    def guard_input(payload: dict[str, Any]) -> GuardrailReport:
+    def guard_input(payload: dict[str, Any], usage: dict[str, Any]) -> GuardrailReport:
         """Redact PII and check for prompt injection; raise if policy says block."""
         t0 = time.perf_counter()
         messages, report = scan_messages(
@@ -162,6 +220,7 @@ def create_app(
             check_injection=settings.guardrail_injection != "off",
         )
         metrics.guardrail_seconds.labels("input").observe(time.perf_counter() - t0)
+        usage["guardrails"] = report.header or None
         for kind, n in report.pii.items():
             metrics.guardrail_events.labels(
                 "input", f"pii_{kind.lower()}", settings.guardrail_pii
@@ -247,12 +306,14 @@ def create_app(
     async def chat_completions(request: Request, tenant_id: str = Depends(tenant)) -> Response:
         payload = await read_payload(request)
         model = payload["model"]
+        usage = request.state.usage
+        usage["model"] = model
         messages = payload.get("messages")
         if not isinstance(messages, list) or not messages:
             raise GatewayError(400, "'messages' must be a non-empty list", "invalid_request_error")
-        report = guard_input(payload)
+        report = guard_input(payload, usage)
         if payload.get("stream"):
-            return await stream_chat(payload, model, report)
+            return await stream_chat(request, payload, model, report)
 
         start = time.perf_counter()
         bypass = "no-cache" in request.headers.get("cache-control", "").lower()
@@ -266,6 +327,7 @@ def create_app(
             metrics.saved_cost.labels(model).inc(hit["cost_usd"])
             elapsed = time.perf_counter() - start
             metrics.latency.labels("chat", model, hit["backend"], "hit").observe(elapsed)
+            usage.update(backend=hit["backend"], cache="HIT")
             return JSONResponse(
                 hit["response"],
                 headers=_headers(hit["backend"], "HIT", 0.0, elapsed, report),
@@ -288,6 +350,7 @@ def create_app(
                 )
                 headers = _headers(hit["backend"], "SEMANTIC_HIT", 0.0, elapsed, report)
                 headers["x-gateway-similarity"] = f"{lookup.similarity:.4f}"
+                usage.update(backend=hit["backend"], cache="SEMANTIC_HIT")
                 return JSONResponse(hit["response"], headers=headers)
 
         routed = time.perf_counter()
@@ -323,12 +386,19 @@ def create_app(
         cache_state = "MISS" if key else "BYPASS"
         metrics.requests.labels("chat", model, "ok").inc()
         metrics.latency.labels("chat", model, backend.name, cache_state.lower()).observe(elapsed)
+        usage.update(
+            backend=backend.name,
+            cache=cache_state,
+            prompt_tokens=prompt,
+            completion_tokens=completion,
+            cost_usd=cost,
+        )
         return JSONResponse(
             response, headers=_headers(backend.name, cache_state, cost, elapsed, report)
         )
 
     async def stream_chat(
-        payload: dict[str, Any], model: str, report: GuardrailReport
+        request: Request, payload: dict[str, Any], model: str, report: GuardrailReport
     ) -> StreamingResponse:
         start = time.perf_counter()
         # Ask OpenAI-compatible servers to append a usage chunk at the end of the stream.
@@ -338,6 +408,9 @@ def create_app(
         except (BackendError, NoBackendAvailable) as exc:
             raise upstream_failure("chat_stream", model, exc) from exc
         metrics.ttft.labels(model, backend.name).observe(ttft)
+        # The row is written when the stream ends, once token counts are known.
+        row = request.state.usage
+        row["deferred"] = True
 
         async def body() -> AsyncIterator[bytes]:
             text: list[str] = []
@@ -364,7 +437,24 @@ def create_app(
                 elapsed = time.perf_counter() - start
                 prompt = int(usage.get("prompt_tokens") or estimate_tokens(prompt_text(payload)))
                 completion = int(usage.get("completion_tokens") or estimate_tokens("".join(text)))
-                record_usage(model, backend, prompt, completion)
+                cost = record_usage(model, backend, prompt, completion)
+                if ledger:
+                    ledger.record(
+                        UsageEvent(
+                            id=request.state.request_id,
+                            tenant=row["tenant"],
+                            route="chat_stream",
+                            model=model,
+                            backend=backend.name,
+                            cache="BYPASS",
+                            status=200 if outcome == "ok" else 502,
+                            prompt_tokens=prompt,
+                            completion_tokens=completion,
+                            cost_usd=cost,
+                            latency_ms=(time.perf_counter() - request.state.received) * 1000,
+                            guardrails=row.get("guardrails"),
+                        )
+                    )
                 if completion and elapsed > ttft:
                     metrics.tokens_per_second.labels(model, backend.name).observe(
                         completion / (elapsed - ttft)
@@ -388,6 +478,7 @@ def create_app(
     async def embeddings(request: Request, _: str = Depends(tenant)) -> Response:
         payload = await read_payload(request)
         model = payload["model"]
+        request.state.usage["model"] = model
         if "input" not in payload:
             raise GatewayError(400, "'input' is required", "invalid_request_error")
         start = time.perf_counter()
@@ -401,7 +492,37 @@ def create_app(
         metrics.upstream_latency.labels("embeddings", backend.name).observe(elapsed)
         metrics.requests.labels("embeddings", model, "ok").inc()
         metrics.latency.labels("embeddings", model, backend.name, "bypass").observe(elapsed)
+        request.state.usage.update(
+            backend=backend.name, cache="BYPASS", prompt_tokens=prompt, cost_usd=cost
+        )
         return JSONResponse(response, headers=_headers(backend.name, "BYPASS", cost, elapsed))
+
+    @app.get("/v1/usage")
+    async def usage_summary(tenant_id: str = Depends(tenant), days: int = 30) -> dict[str, Any]:
+        """The caller's own usage over the last `days` days, per model."""
+        if store is None:
+            raise GatewayError(503, "usage ledger is not configured", "ledger_unavailable")
+        since = datetime.now(UTC) - timedelta(days=max(1, min(days, 366)))
+        if ledger:
+            await ledger.flush()  # include requests made a moment ago
+        try:
+            rows = await store.summary(tenant_id, since)
+        except Exception as exc:
+            raise GatewayError(
+                503, f"usage ledger unavailable: {exc}", "ledger_unavailable"
+            ) from exc
+        totals = {
+            k: sum(r[k] for r in rows)
+            for k in (
+                "requests",
+                "errors",
+                "cache_hits",
+                "prompt_tokens",
+                "completion_tokens",
+                "cost_usd",
+            )
+        }
+        return {"tenant": tenant_id, "since": since.isoformat(), "totals": totals, "models": rows}
 
     return app
 

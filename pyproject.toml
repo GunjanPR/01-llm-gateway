@@ -17,6 +17,7 @@ dependencies = [
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
     "prometheus-client>=0.20",
+    "asyncpg>=0.29",
 ]
 
 [project.optional-dependencies]

@@ -27,9 +27,9 @@ test-integration:
 run:
 	$(PYTHON) -m llm_gateway --reload
 
-# Redis + Prometheus + Grafana in Docker, for use with `make run`
+# Redis + PostgreSQL + Prometheus + Grafana in Docker, for use with `make run`
 up:
-	docker compose up -d redis prometheus grafana
+	docker compose up -d redis postgres prometheus grafana
 
 # Everything in Docker, including the gateway
 up-all:

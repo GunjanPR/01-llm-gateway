@@ -147,13 +147,17 @@ def client_factory(
     clients: list[TestClient] = []
 
     def factory(
-        backends: list[OpenAICompatibleBackend], vector_index: Any = None, **overrides: Any
+        backends: list[OpenAICompatibleBackend],
+        vector_index: Any = None,
+        ledger_writer: Any = None,
+        **overrides: Any,
     ) -> TestClient:
         app = create_app(
             settings.model_copy(update=overrides),
             backends=backends,
             redis=redis,
             vector_index=vector_index,
+            ledger_writer=ledger_writer,
         )
         client = TestClient(app)
         client.__enter__()

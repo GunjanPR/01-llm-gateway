@@ -25,6 +25,7 @@ the [Healthcare RAG](../02-healthcare-rag/) project. Requests can go to local mo
 | Response cache | Exact-match Redis cache keyed by a SHA-256 of the canonical request. Modes: `all`, `deterministic`, `off`. `Cache-Control: no-cache` bypasses it. Entries are kept separate per API key by default (`CACHE_SCOPE=tenant`). |
 | Semantic cache | Reuses an answer when a new prompt *means* the same as a cached one: `nomic-embed-text` embeddings, Redis 8 vector search (HNSW, cosine), then an LLM verifier. 27/27 paraphrases hit with 0/34 false hits on the tuning set; 8/10 hits with 0/10 false hits on a held-out set. See [Semantic cache](#semantic-cache). |
 | Cost tracking | Token usage from the backend, or estimated if the backend doesn't report it, times $/1K pricing per backend. The cost of each request goes in the `x-gateway-cost-usd` header. |
+| Usage ledger | One PostgreSQL row per request: tenant, model, backend, cache result, status, tokens, cost, latency and guardrail findings, including rejected and failed requests. Writes are batched in the background, so they never slow a response. `GET /v1/usage` returns the caller's own totals per model. Every response has an `x-request-id` that matches its row. |
 | Guardrails | PII redaction (email, phone, SSN, credit card with a Luhn check, IP address) on prompts and responses, and prompt-injection detection (5 rule families). Each can be off, flag/redact, or block; see [Guardrails](#guardrails) |
 | Resilience | If Redis goes down, cache and rate limiting are skipped (fail open) instead of failing requests |
 | Metrics | Prometheus `/metrics`: requests by outcome, latency histograms, TTFT, tokens/s, tokens, spend, cache hits and savings, backend errors, breaker state |
@@ -82,6 +83,37 @@ Settings: `SEMANTIC_CACHE_ENABLED`, `SEMANTIC_CACHE_THRESHOLD`, `SEMANTIC_CACHE_
 `SEMANTIC_CACHE_VERIFY_MODEL`. Metrics: `llmgw_semantic_cache_total{outcome}`,
 `llmgw_semantic_cache_seconds{stage}`, `llmgw_semantic_similarity`.
 
+### Usage ledger
+
+When `LEDGER_DATABASE_URL` is set, every chat and embeddings request is written to the
+`usage_events` table (the schema is created on startup), whether it succeeded, hit the cache,
+was blocked by a guardrail, was rate-limited or failed upstream:
+
+| Column | Example |
+|---|---|
+| `id` | the response's `x-request-id` |
+| `tenant` | first 12 hex chars of SHA-256(API key); the key itself is never stored |
+| `route`, `model`, `backend` | `chat`, `llama3.2`, `ollama` |
+| `cache` | `MISS`, `HIT`, `SEMANTIC_HIT`, `BYPASS` |
+| `status` | `200`, `400` (guardrail), `429`, `502` |
+| `prompt_tokens`, `completion_tokens`, `cost_usd`, `latency_ms` | `28`, `10`, `0.0`, `6734.9` |
+| `guardrails` | `pii_email=1,injection=ignore_instructions` |
+
+Rows go onto an in-memory queue, and a background task writes them with batched `COPY`
+(`LEDGER_BATCH_SIZE`, `LEDGER_FLUSH_INTERVAL_SECONDS`). If PostgreSQL is down, rows stay
+queued and are retried. Past `LEDGER_MAX_QUEUE`, the oldest rows are dropped and counted in
+`llmgw_ledger_dropped_total`, so a database outage never takes the gateway down.
+
+```bash
+curl -H "Authorization: Bearer $GATEWAY_KEY" "http://localhost:8000/v1/usage?days=7"
+# {"totals": {"requests": 2, "cache_hits": 1, "prompt_tokens": 28, ...},
+#  "models": [{"model": "llama3.2", "latency_p50_ms": ..., "latency_p95_ms": ...}]}
+```
+
+**Measured cost:** with the ledger and guardrails on, client-side overhead on 1-token requests
+was +4.4 ms at p50 (42.5 → 46.9 ms, 3×100 alternating requests), versus +4.2 ms without
+them, so no measurable change. All 326 rows were written, with 0 write errors and 0 dropped.
+
 ### Guardrails
 
 Guardrails are rule-based and run in-process before the model call, so they add no extra
@@ -109,6 +141,7 @@ added latency. Embedding requests aren't guarded, so RAG documents keep their or
 | Model backends | Ollama (native, GPU), vLLM, any OpenAI-compatible hosted API (e.g. Groq) |
 | Observability | Prometheus, Grafana |
 | Load testing | `scripts/bench.py` (async httpx: p50/p95/p99, TTFT, throughput) |
+| Usage ledger | PostgreSQL 16 (asyncpg, batched `COPY`) |
 | Infra | Docker, Docker Compose, GitHub Actions |
 
 ## Architecture
@@ -175,6 +208,8 @@ Every variable is documented in [.env.example](.env.example). The ones you'll mo
 
 - `GATEWAY_API_KEYS`: the client keys the gateway accepts. **This is required**; the gateway
   rejects every request if it's empty.
+- `POSTGRES_PASSWORD` and `LEDGER_DATABASE_URL`: generate a password the same way and put it
+  in both. Docker Compose requires `POSTGRES_PASSWORD`.
 - `OLLAMA_MODELS`: the models Ollama serves. A `public=upstream` entry maps a gateway model
   name to an Ollama tag.
 - `ROUTING_POLICY`: `cost`, `latency` or `quality`.
@@ -190,7 +225,7 @@ Every variable is documented in [.env.example](.env.example). The ones you'll mo
 
 ### 1. Start the infrastructure (Redis, Prometheus, Grafana)
 ```bash
-make up                 # = docker compose up -d redis prometheus grafana
+make up                 # = docker compose up -d redis postgres prometheus grafana
 ```
 
 ### 2. Start the gateway
@@ -224,6 +259,7 @@ client.chat.completions.create(model="llama3.2", messages=[{"role": "user", "con
 | http://localhost:8000/metrics | Prometheus metrics |
 | http://localhost:8000/docs | OpenAPI UI |
 | http://localhost:9090 | Prometheus |
+| http://localhost:8000/v1/usage | Your API key's usage per model (needs `LEDGER_DATABASE_URL`) |
 | http://localhost:3000 | Grafana: **LLM Gateway** dashboard (admin password from `GRAFANA_ADMIN_PASSWORD`) |
 
 ### Tests
@@ -374,12 +410,12 @@ Milestones follow [SHARED_STANDARDS.md](../SHARED_STANDARDS.md). Each one has a 
 - [x] Exact-match response cache (Redis, TTL, modes)
 - [x] Semantic cache: embeddings + Redis vector search + LLM verifier, evaluated on tuning and held-out pairs
 - [x] Per-tenant cache isolation (`CACHE_SCOPE=tenant` default)
-- [ ] Usage / cost ledger per tenant (PostgreSQL)
+- [x] Usage / cost ledger per tenant (PostgreSQL, batched background writes, `/v1/usage`)
 
 ### M4: Evaluation & testing
-- [x] Unit tests for router, limiter, caches, config, guardrails and API (76 tests)
+- [x] Unit tests for router, limiter, caches, config, guardrails and API (84 tests)
 - [x] Integration tests against the real stack written (`tests/integration/`)
-- [x] Integration tests run green against real Ollama + Redis (7/7)
+- [x] Integration tests run green against real Ollama + Redis (8/8)
 - [x] Benchmark harness (`scripts/bench.py`) with a direct-to-backend baseline
 - [x] Failover harness (`scripts/failover.py`) for killing a backend under load
 - [x] Kaggle notebook to reproduce benchmarks + failover on a free T4 GPU
@@ -412,6 +448,7 @@ Milestones follow [SHARED_STANDARDS.md](../SHARED_STANDARDS.md). Each one has a 
 ├── src/llm_gateway/
 │   ├── guardrails.py      # PII redaction, prompt-injection detection
 │   ├── semantic_cache.py  # embeddings + Redis vector search + LLM verifier
+│   ├── ledger.py          # PostgreSQL usage ledger (queued, batched writes)
 │   ├── __main__.py        # python -m llm_gateway
 │   ├── main.py            # FastAPI app factory + routes
 │   ├── router.py          # policy ranking, retries, fallback, circuit breaker
