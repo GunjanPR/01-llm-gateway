@@ -41,6 +41,19 @@ class GatewayMetrics:
             buckets=OVERHEAD_BUCKETS,
             registry=r,
         )
+        self.guardrail_events = Counter(
+            "llmgw_guardrail_events_total",
+            "PII entities and prompt-injection rules triggered",
+            ["direction", "kind", "action"],
+            registry=r,
+        )
+        self.guardrail_seconds = Histogram(
+            "llmgw_guardrail_seconds",
+            "Time spent in guardrail checks",
+            ["direction"],
+            buckets=OVERHEAD_BUCKETS,
+            registry=r,
+        )
         self.ttft = Histogram(
             "llmgw_ttft_seconds",
             "Time to first token for streaming requests",

@@ -19,6 +19,7 @@ from llm_gateway import __version__
 from llm_gateway.backends import BackendError, OpenAICompatibleBackend
 from llm_gateway.cache import ResponseCache, cache_key, is_cacheable
 from llm_gateway.config import Settings, get_settings
+from llm_gateway.guardrails import GuardrailReport, redact_response, scan_messages
 from llm_gateway.metrics import (
     GatewayMetrics,
     cost_usd,
@@ -137,6 +138,43 @@ def create_app(
         status = 404 if isinstance(exc, NoBackendAvailable) and not exc.errors else 502
         return GatewayError(status, str(exc), "upstream_error")
 
+    def guard_input(payload: dict[str, Any]) -> GuardrailReport:
+        """Redact PII and check for prompt injection; raise if policy says block."""
+        t0 = time.perf_counter()
+        messages, report = scan_messages(
+            payload["messages"],
+            redact=settings.guardrail_pii != "off",
+            check_injection=settings.guardrail_injection != "off",
+        )
+        metrics.guardrail_seconds.labels("input").observe(time.perf_counter() - t0)
+        for kind, n in report.pii.items():
+            metrics.guardrail_events.labels(
+                "input", f"pii_{kind.lower()}", settings.guardrail_pii
+            ).inc(n)
+        for rule in report.injection:
+            metrics.guardrail_events.labels(
+                "input", f"injection_{rule}", settings.guardrail_injection
+            ).inc()
+        if report.pii and settings.guardrail_pii == "block":
+            kinds = ", ".join(sorted(report.pii))
+            raise GatewayError(400, f"request contains PII ({kinds})", "guardrail_violation")
+        if report.injection and settings.guardrail_injection == "block":
+            rules = ", ".join(report.injection)
+            raise GatewayError(400, f"possible prompt injection ({rules})", "guardrail_violation")
+        payload["messages"] = messages
+        return report
+
+    def guard_output(response: dict[str, Any], report: GuardrailReport) -> dict[str, Any]:
+        if settings.guardrail_output_pii == "off":
+            return response
+        t0 = time.perf_counter()
+        response, found = redact_response(response)
+        metrics.guardrail_seconds.labels("output").observe(time.perf_counter() - t0)
+        for kind, n in found.items():
+            metrics.guardrail_events.labels("output", f"pii_{kind.lower()}", "redact").inc(n)
+            report.pii[f"OUT_{kind}"] += n
+        return response
+
     def record_usage(model: str, backend: Backend, prompt: int, completion: int) -> float:
         metrics.tokens.labels(model, backend.name, "prompt").inc(prompt)
         metrics.tokens.labels(model, backend.name, "completion").inc(completion)
@@ -197,8 +235,9 @@ def create_app(
         messages = payload.get("messages")
         if not isinstance(messages, list) or not messages:
             raise GatewayError(400, "'messages' must be a non-empty list", "invalid_request_error")
+        report = guard_input(payload)
         if payload.get("stream"):
-            return await stream_chat(payload, model)
+            return await stream_chat(payload, model, report)
 
         start = time.perf_counter()
         bypass = "no-cache" in request.headers.get("cache-control", "").lower()
@@ -213,7 +252,7 @@ def create_app(
             metrics.latency.labels("chat", model, hit["backend"], "hit").observe(elapsed)
             return JSONResponse(
                 hit["response"],
-                headers=_headers(hit["backend"], "HIT", 0.0, elapsed),
+                headers=_headers(hit["backend"], "HIT", 0.0, elapsed, report),
             )
         if key:
             metrics.cache.labels("miss").inc()
@@ -226,6 +265,7 @@ def create_app(
         upstream = time.perf_counter() - routed
         metrics.upstream_latency.labels("chat", backend.name).observe(upstream)
 
+        response = guard_output(response, report)
         prompt, completion = usage_from(response)
         if not response.get("usage"):
             prompt = estimate_tokens(prompt_text(payload))
@@ -250,9 +290,13 @@ def create_app(
         cache_state = "MISS" if key else "BYPASS"
         metrics.requests.labels("chat", model, "ok").inc()
         metrics.latency.labels("chat", model, backend.name, cache_state.lower()).observe(elapsed)
-        return JSONResponse(response, headers=_headers(backend.name, cache_state, cost, elapsed))
+        return JSONResponse(
+            response, headers=_headers(backend.name, cache_state, cost, elapsed, report)
+        )
 
-    async def stream_chat(payload: dict[str, Any], model: str) -> StreamingResponse:
+    async def stream_chat(
+        payload: dict[str, Any], model: str, report: GuardrailReport
+    ) -> StreamingResponse:
         start = time.perf_counter()
         # Ask OpenAI-compatible servers to append a usage chunk at the end of the stream.
         payload = {**payload, "stream_options": {"include_usage": True}}
@@ -300,7 +344,11 @@ def create_app(
         return StreamingResponse(
             body(),
             media_type="text/event-stream",
-            headers={"x-gateway-backend": backend.name, "x-gateway-cache": "BYPASS"},
+            headers={
+                "x-gateway-backend": backend.name,
+                "x-gateway-cache": "BYPASS",
+                **({"x-gateway-guardrails": report.header} if report.header else {}),
+            },
         )
 
     @app.post("/v1/embeddings")
@@ -331,10 +379,15 @@ def _completion_text(response: dict[str, Any]) -> str:
     )
 
 
-def _headers(backend: str, cache: str, cost: float, elapsed: float) -> dict[str, str]:
-    return {
+def _headers(
+    backend: str, cache: str, cost: float, elapsed: float, report: GuardrailReport | None = None
+) -> dict[str, str]:
+    headers = {
         "x-gateway-backend": backend,
         "x-gateway-cache": cache,
         "x-gateway-cost-usd": f"{cost:.8f}",
         "x-gateway-latency-ms": f"{elapsed * 1000:.1f}",
     }
+    if report and report.header:
+        headers["x-gateway-guardrails"] = report.header
+    return headers

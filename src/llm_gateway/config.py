@@ -78,6 +78,11 @@ class Settings(BaseSettings):
     hosted_cost_per_1k_output: float = 0.0
     hosted_quality: float = 0.8
 
+    # Guardrails
+    guardrail_pii: Literal["off", "redact", "block"] = "redact"
+    guardrail_output_pii: Literal["off", "redact"] = "redact"
+    guardrail_injection: Literal["off", "flag", "block"] = "flag"
+
     # Routing
     default_model: str = "llama3.2"
     routing_policy: Literal["cost", "latency", "quality"] = "cost"

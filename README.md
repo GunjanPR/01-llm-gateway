@@ -24,12 +24,32 @@ the [Healthcare RAG](../02-healthcare-rag/) project. Requests can go to local mo
 | Model aliasing | Maps a public model name to each backend's own name, e.g. `llama3.2` → `llama3.2` on Ollama and `llama-3.1-8b-instant` on Groq, so fallback works across providers |
 | Response cache | Exact-match Redis cache keyed by a SHA-256 of the canonical request. Modes: `all`, `deterministic`, `off`. `Cache-Control: no-cache` bypasses it. |
 | Cost tracking | Token usage from the backend, or estimated if the backend doesn't report it, times $/1K pricing per backend. The cost of each request goes in the `x-gateway-cost-usd` header. |
+| Guardrails | PII redaction (email, phone, SSN, credit card with a Luhn check, IP address) on prompts and responses, and prompt-injection detection (5 rule families). Each can be off, flag/redact, or block; see [Guardrails](#guardrails) |
 | Resilience | If Redis goes down, cache and rate limiting are skipped (fail open) instead of failing requests |
 | Metrics | Prometheus `/metrics`: requests by outcome, latency histograms, TTFT, tokens/s, tokens, spend, cache hits and savings, backend errors, breaker state |
 | Dashboards | A provisioned Grafana dashboard (15 panels), including the gateway's per-request overhead |
 
 Every response carries `x-gateway-backend`, `x-gateway-cache` (`HIT`/`MISS`/`BYPASS`),
-`x-gateway-cost-usd` and `x-gateway-latency-ms` headers.
+`x-gateway-cost-usd` and `x-gateway-latency-ms` headers, plus `x-gateway-guardrails` (e.g.
+`pii_email=1,injection=ignore_instructions`) when a guardrail fires.
+
+### Guardrails
+
+Guardrails are rule-based and run in-process before the model call, so they add no extra
+model round trip.
+
+| Setting | Values (default **bold**) | Effect |
+|---|---|---|
+| `GUARDRAIL_PII` | off, **redact**, block | Replaces PII in every message with `[REDACTED_<KIND>]` before routing, caching and logging. `block` rejects the request with 400 `guardrail_violation` instead. |
+| `GUARDRAIL_OUTPUT_PII` | off, **redact** | Redacts PII in non-streaming model answers. Streaming answers are not redacted, because an entity can be split across chunks. |
+| `GUARDRAIL_INJECTION` | off, **flag**, block | Checks user and tool messages (not the system prompt) against 5 rule families: ignore-instructions, reveal-system-prompt, role override, jailbreak keywords, chat-template delimiters. `flag` adds a header and a metric; `block` returns 400. |
+
+Every event is counted in `llmgw_guardrail_events_total{direction,kind,action}`, and the time
+spent in `llmgw_guardrail_seconds`.
+
+**Limits:** regexes miss unusual PII formats, and the injection rules catch common phrasings,
+not every adversarial prompt. A second-stage ML classifier could catch more, at the cost of
+added latency. Embedding requests aren't guarded, so RAG documents keep their original text.
 
 ## Tech Stack
 
@@ -254,6 +274,22 @@ backend was killed under load.
 *The dashboard during the runs above: load, cache and streaming runs, then the failover
 (backend errors spike, the dead node's breaker opens) and the overhead run.*
 
+### Guardrail latency (i5-13420H, on AC power, 2026-10-02)
+
+From [scripts/guardrail_bench.py](scripts/guardrail_bench.py), which times input redaction plus
+injection checks on a biomedical prompt that contains an email and a phone number.
+
+| Prompt size | p50 | p95 | Before optimization (p50) |
+|---|---|---|---|
+| 226 chars | 35 µs | 61 µs | 54 µs |
+| 2.3k chars | 249 µs | 413 µs | 393 µs |
+| 22.7k chars (RAG-sized context) | 2.59 ms | 3.31 ms | 4.18 ms |
+
+Cost grows linearly with prompt size, about 0.11 µs per character. Two changes cut it by 36–38%:
+the five PII patterns were merged into one single-pass regex, and each injection rule now
+runs only when one of its trigger words is present. Even a 20k-character context costs
+under 0.1% of a ~9.5 s generation.
+
 ### Results: Kaggle T4, full GPU power
 
 *Not run yet.* Run [notebooks/kaggle_benchmark.ipynb](notebooks/kaggle_benchmark.ipynb)
@@ -282,7 +318,7 @@ Milestones follow [SHARED_STANDARDS.md](../SHARED_STANDARDS.md). Each one has a 
 - [x] One adapter for every OpenAI-compatible backend (Ollama, vLLM, hosted); several Ollama nodes via a comma-separated `OLLAMA_BASE_URL`
 - [x] Routing policy (cost / latency / quality) with retries, fallback and circuit breaker
 - [x] Model aliasing across providers
-- [ ] Guardrails: PII redaction, prompt-injection checks
+- [x] Guardrails: PII redaction (input + output), prompt-injection detection; off/flag/redact/block modes
 
 ### M3: Data / storage layer
 - [x] Redis per-tenant rate limiting (fixed one-minute window)
@@ -291,7 +327,7 @@ Milestones follow [SHARED_STANDARDS.md](../SHARED_STANDARDS.md). Each one has a 
 - [ ] Usage / cost ledger per tenant (PostgreSQL)
 
 ### M4: Evaluation & testing
-- [x] Unit tests for router, limiter, cache, config and API (39 tests)
+- [x] Unit tests for router, limiter, cache, config, guardrails and API (67 tests)
 - [x] Integration tests against the real stack written (`tests/integration/`)
 - [x] Integration tests run green against real Ollama + Redis (5/5)
 - [x] Benchmark harness (`scripts/bench.py`) with a direct-to-backend baseline
@@ -324,6 +360,7 @@ Milestones follow [SHARED_STANDARDS.md](../SHARED_STANDARDS.md). Each one has a 
 ```
 01-llm-gateway/
 ├── src/llm_gateway/
+│   ├── guardrails.py      # PII redaction, prompt-injection detection
 │   ├── __main__.py        # python -m llm_gateway
 │   ├── main.py            # FastAPI app factory + routes
 │   ├── router.py          # policy ranking, retries, fallback, circuit breaker
@@ -335,6 +372,7 @@ Milestones follow [SHARED_STANDARDS.md](../SHARED_STANDARDS.md). Each one has a 
 ├── tests/                 # unit tests; tests/integration/ = live stack
 ├── scripts/bench.py       # load test / benchmark
 ├── scripts/failover.py    # availability while a backend is killed
+├── scripts/guardrail_bench.py  # guardrail latency by prompt size
 ├── notebooks/kaggle_benchmark.ipynb  # reproducible GPU benchmark on Kaggle
 ├── deploy/                # Prometheus config, Grafana provisioning + dashboard
 ├── .github/workflows/ci.yml

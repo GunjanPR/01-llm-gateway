@@ -82,3 +82,11 @@ def test_metrics_exposed(client):
     text = client.get("/metrics").text
     assert "llmgw_requests_total" in text
     assert "llmgw_ttft_seconds_bucket" in text
+
+
+def test_real_guardrails_redact_before_the_model(client):
+    body = chat("My email is jane.doe@example.com. Repeat my email back to me exactly.")
+    resp = client.post("/v1/chat/completions", json=body, headers={"Cache-Control": "no-cache"})
+    assert resp.status_code == 200, resp.text
+    assert "pii_email=1" in resp.headers["x-gateway-guardrails"]
+    assert "jane.doe@example.com" not in resp.json()["choices"][0]["message"]["content"]
