@@ -101,6 +101,7 @@ def create_app(
 
     async def tenant(request: Request) -> str:
         """Authenticate the bearer key and enforce the tenant's rate limit."""
+        request.state.received = time.perf_counter()
         header = request.headers.get("authorization", "")
         scheme, _, key = header.partition(" ")
         if scheme.lower() != "bearer" or not any(
@@ -217,11 +218,12 @@ def create_app(
         if key:
             metrics.cache.labels("miss").inc()
 
+        routed = time.perf_counter()
         try:
             response, backend = await router.run(model, lambda b: b.chat(payload))
         except (BackendError, NoBackendAvailable) as exc:
             raise upstream_failure("chat", model, exc) from exc
-        upstream = time.perf_counter() - start
+        upstream = time.perf_counter() - routed
         metrics.upstream_latency.labels("chat", backend.name).observe(upstream)
 
         prompt, completion = usage_from(response)
@@ -242,7 +244,9 @@ def create_app(
                     "cost_usd": cost,
                 },
             )
-        elapsed = time.perf_counter() - start
+        end = time.perf_counter()
+        elapsed = end - start
+        metrics.overhead.labels("chat").observe(end - request.state.received - upstream)
         cache_state = "MISS" if key else "BYPASS"
         metrics.requests.labels("chat", model, "ok").inc()
         metrics.latency.labels("chat", model, backend.name, cache_state.lower()).observe(elapsed)

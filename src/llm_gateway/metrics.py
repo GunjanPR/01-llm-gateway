@@ -6,6 +6,7 @@ from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
 
 from llm_gateway.config import BackendConfig
 
+OVERHEAD_BUCKETS = (0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1)
 LATENCY_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20, 30, 60)
 
 
@@ -31,6 +32,13 @@ class GatewayMetrics:
             "Time spent waiting on the backend (successful calls)",
             ["route", "backend"],
             buckets=LATENCY_BUCKETS,
+            registry=r,
+        )
+        self.overhead = Histogram(
+            "llmgw_gateway_overhead_seconds",
+            "Time the gateway adds per request: total handling time minus backend wait",
+            ["route"],
+            buckets=OVERHEAD_BUCKETS,
             registry=r,
         )
         self.ttft = Histogram(

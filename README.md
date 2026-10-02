@@ -26,7 +26,7 @@ the [Healthcare RAG](../02-healthcare-rag/) project. Requests can go to local mo
 | Cost tracking | Token usage from the backend, or estimated if the backend doesn't report it, times $/1K pricing per backend. The cost of each request goes in the `x-gateway-cost-usd` header. |
 | Resilience | If Redis goes down, cache and rate limiting are skipped (fail open) instead of failing requests |
 | Metrics | Prometheus `/metrics`: requests by outcome, latency histograms, TTFT, tokens/s, tokens, spend, cache hits and savings, backend errors, breaker state |
-| Dashboards | A provisioned Grafana dashboard (15 panels) |
+| Dashboards | A provisioned Grafana dashboard (15 panels), including the gateway's per-request overhead |
 
 Every response carries `x-gateway-backend`, `x-gateway-cache` (`HIT`/`MISS`/`BYPASS`),
 `x-gateway-cost-usd` and `x-gateway-latency-ms` headers.
@@ -214,8 +214,58 @@ node is killed mid-run. Results are written to `/kaggle/working/results/`: `summ
     direct and gateway stay valid because both run under the same limit, but absolute
     tokens/s are below what this GPU can do.
   - *Full-speed, reproducible:* the Kaggle notebook above.
-- **Results:** *not finalized yet.* The local power-capped runs and the Kaggle numbers will
-  go here.
+- **Raw data:** [docs/benchmarks/2026-10-02-local-usbc/](docs/benchmarks/2026-10-02-local-usbc/)
+  (one JSON line per run).
+
+### Results: local, RTX 4050 Laptop at a 20 W cap (measured 2026-10-02)
+
+Setup: Windows 11, Ollama 0.35.0 with `llama3.2` (3B) fully on the GPU, the gateway on the
+host (Python 3.11), and Redis 7 in Docker Desktop. The gateway rate limiter was off and the
+cache was bypassed (`Cache-Control: no-cache`) except in the cache run. Direct and gateway
+runs alternated. **0 errors across 920 benchmark requests.**
+
+| What | Direct to Ollama (baseline) | Through the gateway | Difference |
+|---|---|---|---|
+| **Overhead:** 1-token completions, 1 client, 3×100 requests, median of run p50s | 41.5 ms | 45.7 ms | **+4.2 ms** at p50, including the extra HTTP hop |
+| **Overhead, in-process:** gateway's own histogram, 317 requests | – | p50 < 0.25 ms, p95 < 0.5 ms, mean 0.39 ms | auth, rate-limit check, cache lookup, routing, metrics |
+| **Load:** 4 clients, 64-token answers, 2×40 requests, mean of run p50s | 9.53 s | 9.64 s | +1.1%, within run-to-run noise (gateway runs: 9.41 s and 9.86 s) |
+| **Load throughput** | 0.42 req/s, 26.5 tok/s | 0.42 req/s, 26.5 tok/s | none |
+| **Streaming TTFT:** 1 client, 2×30 requests, mean of run p50s | 56.6 ms | 55.2 ms | no measurable difference at p50; p95 about +7 ms (60 → 68 ms) |
+| **Cache:** 50% repeated prompts, 4 clients, 40 requests | – | 17 hits (42.5%); 0.74 req/s vs 0.42 uncached | **+74% throughput**; a hit is served in 1–3 ms instead of ~9.5 s of generation |
+
+**Failover** (`scripts/failover.py`): two Ollama nodes, 2 clients, `llama3.2:1b`, 60 s. The
+primary node was killed at t = 20 s.
+
+| Requests | Succeeded | Availability | Errors absorbed by retry/fallback | Slowest request during the switch |
+|---|---|---|---|---|
+| 469 | 469 | **100%** | 6 connection errors, then the dead node's circuit breaker opened | 3.18 s |
+
+Traffic was served entirely by the primary until it was killed. From the next 5-second
+window on, everything went to the second node.
+
+**Summary:** the gateway added **4.2 ms at p50** on 1-token requests across 300 direct and
+300 gateway requests. On realistic 64-token requests the difference is within measurement
+noise. Its own processing takes **under 0.5 ms for 95% of requests**. With half the prompts
+repeated, the cache raised throughput by **74%**. Availability stayed at **100%** when a
+backend was killed under load.
+
+![Grafana dashboard during the benchmark and failover runs](docs/grafana-dashboard.png)
+
+*The dashboard during the runs above: load, cache and streaming runs, then the failover
+(backend errors spike, the dead node's breaker opens) and the overhead run.*
+
+### Results: Kaggle T4, full GPU power
+
+*Not run yet.* Run [notebooks/kaggle_benchmark.ipynb](notebooks/kaggle_benchmark.ipynb)
+and paste `headline.json` here.
+
+| What | Direct | Gateway | Difference |
+|---|---|---|---|
+| Overhead p50 (1-token) | – | – | – |
+| Load p50 (64-token, 4 clients) | – | – | – |
+| Streaming TTFT p50 | – | – | – |
+| Cache throughput gain (50% repeats) | – | – | – |
+| Failover availability | – | – | – |
 
 ## Milestones
 
@@ -241,30 +291,33 @@ Milestones follow [SHARED_STANDARDS.md](../SHARED_STANDARDS.md). Each one has a 
 - [ ] Usage / cost ledger per tenant (PostgreSQL)
 
 ### M4: Evaluation & testing
-- [x] Unit tests for router, limiter, cache, config and API (38 tests)
+- [x] Unit tests for router, limiter, cache, config and API (39 tests)
 - [x] Integration tests against the real stack written (`tests/integration/`)
 - [x] Integration tests run green against real Ollama + Redis (5/5)
 - [x] Benchmark harness (`scripts/bench.py`) with a direct-to-backend baseline
 - [x] Failover harness (`scripts/failover.py`) for killing a backend under load
 - [x] Kaggle notebook to reproduce benchmarks + failover on a free T4 GPU
-- [ ] Benchmarks run locally (USB-C, 20 W cap) and on Kaggle; failover measured
+- [x] Benchmarks run locally (USB-C, 20 W cap); failover measured (100% availability)
+- [ ] Benchmarks run on Kaggle T4 (full GPU power)
 
 ### M5: Observability / monitoring
 - [x] Prometheus metrics: TTFT, tokens/sec, p50/p95 latency, cache hit rate, cost
 - [x] Grafana dashboard provisioned (`deploy/grafana/`)
-- [ ] Dashboard verified with live traffic (screenshot in README)
+- [x] Dashboard verified with live traffic (screenshot in README)
+- [x] In-process gateway overhead histogram (`llmgw_gateway_overhead_seconds`)
 - [ ] OpenTelemetry tracing
 
 ### M6: Containerization & CI/CD
 - [x] Dockerfile and `docker-compose.yml` (gateway, Redis, Prometheus, Grafana; optional Ollama profile)
 - [x] `make up` verified locally (Redis, Prometheus scraping the gateway, Grafana dashboard provisioned)
-- [ ] `make up-all` (gateway container → host Ollama) verified locally
+- [x] `make up-all` verified locally (gateway container → host Ollama, healthy, real completion)
 - [x] GitHub Actions: lint, test, image build and container smoke test
 - [ ] Kubernetes manifests (optional)
 
 ### M7: Docs, benchmarks & demo
-- [ ] README with measured results against the baseline
-- [ ] Benchmark report (latency overhead, cache savings, failover)
+- [x] README with measured results against the baseline (local, 20 W cap)
+- [x] Benchmark report (latency overhead, cache savings, failover) with raw data
+- [ ] Kaggle full-power numbers added
 - [ ] Demo recording or public deploy
 
 ## Project Layout

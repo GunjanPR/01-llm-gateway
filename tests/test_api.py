@@ -175,3 +175,10 @@ def test_health_reports_backends_and_redis(client_factory):
     body = client.get("/health").json()
     assert body["redis"] is True
     assert body["backends"][0]["name"] == "a"
+
+
+def test_gateway_overhead_is_measured(client_factory):
+    client = client_factory([make_backend("a", Upstream(ok()))])
+    client.post("/v1/chat/completions", json=CHAT, headers=AUTH)
+    text = client.get("/metrics").text
+    assert 'llmgw_gateway_overhead_seconds_count{route="chat"} 1.0' in text
