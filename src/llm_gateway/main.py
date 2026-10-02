@@ -29,6 +29,7 @@ from llm_gateway.metrics import (
 )
 from llm_gateway.ratelimit import RateLimiter
 from llm_gateway.router import Backend, NoBackendAvailable, Router
+from llm_gateway.semantic_cache import RedisVectorIndex, SemanticCache, SemanticLookup, VectorIndex
 
 logger = logging.getLogger("llm_gateway")
 
@@ -56,6 +57,7 @@ def create_app(
     settings: Settings | None = None,
     backends: list[Backend] | None = None,
     redis: Redis | None = None,
+    vector_index: VectorIndex | None = None,
 ) -> FastAPI:
     settings = settings or get_settings()
     logging.basicConfig(level=settings.log_level.upper())
@@ -78,6 +80,19 @@ def create_app(
     )
     cache = ResponseCache(redis, settings.cache_ttl_seconds)
     limiter = RateLimiter(redis, settings.rate_limit_rpm)
+    semantic = (
+        SemanticCache(
+            vector_index or RedisVectorIndex(redis),
+            router,
+            embed_model=settings.semantic_cache_embed_model,
+            verify_model=settings.semantic_cache_verify_model,
+            threshold=settings.semantic_cache_threshold,
+            ttl_seconds=settings.cache_ttl_seconds,
+            metrics=metrics,
+        )
+        if settings.semantic_cache_enabled
+        else None
+    )
     api_keys = settings.api_keys
     if not api_keys:
         logger.warning("GATEWAY_API_KEYS is empty: every /v1 request will be rejected")
@@ -229,7 +244,7 @@ def create_app(
         }
 
     @app.post("/v1/chat/completions")
-    async def chat_completions(request: Request, _: str = Depends(tenant)) -> Response:
+    async def chat_completions(request: Request, tenant_id: str = Depends(tenant)) -> Response:
         payload = await read_payload(request)
         model = payload["model"]
         messages = payload.get("messages")
@@ -242,7 +257,8 @@ def create_app(
         start = time.perf_counter()
         bypass = "no-cache" in request.headers.get("cache-control", "").lower()
         cacheable = is_cacheable(payload, settings.cache_mode) and not bypass
-        key = cache_key(payload) if cacheable else None
+        namespace = tenant_id if settings.cache_scope == "tenant" else ""
+        key = cache_key(payload, namespace) if cacheable else None
         if key and (hit := await cache.get(key)):
             metrics.cache.labels("hit").inc()
             metrics.requests.labels("chat", model, "cache_hit").inc()
@@ -256,6 +272,23 @@ def create_app(
             )
         if key:
             metrics.cache.labels("miss").inc()
+        lookup = SemanticLookup()
+        if key and semantic:
+            lookup = await semantic.lookup(payload, namespace)
+            if lookup.entry:
+                hit = lookup.entry
+                metrics.requests.labels("chat", model, "semantic_hit").inc()
+                metrics.saved_tokens.labels(model).inc(
+                    hit["prompt_tokens"] + hit["completion_tokens"]
+                )
+                metrics.saved_cost.labels(model).inc(hit["cost_usd"])
+                elapsed = time.perf_counter() - start
+                metrics.latency.labels("chat", model, hit["backend"], "semantic_hit").observe(
+                    elapsed
+                )
+                headers = _headers(hit["backend"], "SEMANTIC_HIT", 0.0, elapsed, report)
+                headers["x-gateway-similarity"] = f"{lookup.similarity:.4f}"
+                return JSONResponse(hit["response"], headers=headers)
 
         routed = time.perf_counter()
         try:
@@ -274,16 +307,16 @@ def create_app(
         if completion and upstream > 0:
             metrics.tokens_per_second.labels(model, backend.name).observe(completion / upstream)
         if key:
-            await cache.set(
-                key,
-                {
-                    "response": response,
-                    "backend": backend.name,
-                    "prompt_tokens": prompt,
-                    "completion_tokens": completion,
-                    "cost_usd": cost,
-                },
-            )
+            entry = {
+                "response": response,
+                "backend": backend.name,
+                "prompt_tokens": prompt,
+                "completion_tokens": completion,
+                "cost_usd": cost,
+            }
+            await cache.set(key, entry)
+            if semantic:
+                await semantic.store(lookup, entry)
         end = time.perf_counter()
         elapsed = end - start
         metrics.overhead.labels("chat").observe(end - request.state.received - upstream)

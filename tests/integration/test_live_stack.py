@@ -90,3 +90,21 @@ def test_real_guardrails_redact_before_the_model(client):
     assert resp.status_code == 200, resp.text
     assert "pii_email=1" in resp.headers["x-gateway-guardrails"]
     assert "jane.doe@example.com" not in resp.json()["choices"][0]["message"]["content"]
+
+
+def test_real_semantic_cache_reuses_a_paraphrase(client):
+    session = uuid.uuid4().hex  # fresh conversation scope so earlier runs can't interfere
+    system = {"role": "system", "content": f"Session {session}."}
+
+    def ask(text: str) -> httpx.Response:
+        body = chat(text)
+        body["messages"] = [system, *body["messages"]]
+        return client.post("/v1/chat/completions", json=body)
+
+    first = ask("What is the capital of Italy?")
+    assert first.headers["x-gateway-cache"] == "MISS"
+    second = ask("Which city is the capital of Italy?")
+    assert second.headers["x-gateway-cache"] == "SEMANTIC_HIT", second.headers
+    assert second.json() == first.json()
+    third = ask("What is the capital of Spain?")
+    assert third.headers["x-gateway-cache"] == "MISS"  # near-miss must not reuse Italy

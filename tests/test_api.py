@@ -182,3 +182,24 @@ def test_gateway_overhead_is_measured(client_factory):
     client.post("/v1/chat/completions", json=CHAT, headers=AUTH)
     text = client.get("/metrics").text
     assert 'llmgw_gateway_overhead_seconds_count{route="chat"} 1.0' in text
+
+
+def test_cache_is_per_tenant_by_default(client_factory):
+    upstream = Upstream(ok())
+    client = client_factory([make_backend("a", upstream)], gateway_api_keys="k1,k2")
+    for key in ("k1", "k2"):
+        resp = client.post(
+            "/v1/chat/completions", json=CHAT, headers={"Authorization": f"Bearer {key}"}
+        )
+        assert resp.headers["x-gateway-cache"] == "MISS"
+    assert len(upstream.requests) == 2
+
+
+def test_global_cache_scope_shares_entries(client_factory):
+    upstream = Upstream(ok())
+    client = client_factory(
+        [make_backend("a", upstream)], gateway_api_keys="k1,k2", cache_scope="global"
+    )
+    client.post("/v1/chat/completions", json=CHAT, headers={"Authorization": "Bearer k1"})
+    resp = client.post("/v1/chat/completions", json=CHAT, headers={"Authorization": "Bearer k2"})
+    assert resp.headers["x-gateway-cache"] == "HIT"

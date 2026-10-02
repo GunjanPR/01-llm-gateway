@@ -89,6 +89,25 @@ class GatewayMetrics:
             ["model"],
             registry=r,
         )
+        self.semantic_cache = Counter(
+            "llmgw_semantic_cache_total",
+            "Semantic cache lookups by outcome (hit, no_candidate, rejected, error)",
+            ["outcome"],
+            registry=r,
+        )
+        self.semantic_similarity = Histogram(
+            "llmgw_semantic_similarity",
+            "Cosine similarity of the nearest cached prompt, when above threshold",
+            buckets=(0.86, 0.88, 0.9, 0.92, 0.94, 0.96, 0.98, 0.99, 1.0),
+            registry=r,
+        )
+        self.semantic_seconds = Histogram(
+            "llmgw_semantic_cache_seconds",
+            "Time per semantic cache stage",
+            ["stage"],
+            buckets=LATENCY_BUCKETS,
+            registry=r,
+        )
         self.cache = Counter("llmgw_cache_requests_total", "Cache lookups", ["result"], registry=r)
         self.backend_errors = Counter(
             "llmgw_backend_errors_total", "Failed backend calls", ["backend", "kind"], registry=r

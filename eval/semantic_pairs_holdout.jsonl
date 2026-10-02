@@ -1,0 +1,20 @@
+{"a": "How far is the Moon from Earth?", "b": "What is the distance between the Earth and the Moon?", "same": true}
+{"a": "How far is the Moon from Earth?", "b": "How far is Mars from Earth?", "same": false}
+{"a": "What is the chemical formula for table salt?", "b": "What's the formula of sodium chloride?", "same": true}
+{"a": "What is the chemical formula for table salt?", "b": "What is the chemical formula for sugar?", "same": false}
+{"a": "How do I create a virtual environment in Python?", "b": "What's the command to make a Python venv?", "same": true}
+{"a": "How do I create a virtual environment in Python?", "b": "How do I delete a virtual environment in Python?", "same": false}
+{"a": "Who painted the Mona Lisa?", "b": "Which artist painted the Mona Lisa?", "same": true}
+{"a": "Who painted the Mona Lisa?", "b": "Who painted The Starry Night?", "same": false}
+{"a": "What are the side effects of metformin?", "b": "What side effects can metformin cause?", "same": true}
+{"a": "What are the side effects of metformin?", "b": "What is the usual dose of metformin?", "same": false}
+{"a": "Convert 3 kilograms to pounds.", "b": "How many pounds are in 3 kg?", "same": true}
+{"a": "Convert 3 kilograms to pounds.", "b": "Convert 3 pounds to kilograms.", "same": false}
+{"a": "What is the speed of light in a vacuum?", "b": "How fast does light travel in a vacuum?", "same": true}
+{"a": "What is the speed of light in a vacuum?", "b": "What is the speed of sound in air?", "same": false}
+{"a": "Explain the difference between RAM and ROM.", "b": "How is RAM different from ROM?", "same": true}
+{"a": "Explain the difference between RAM and ROM.", "b": "Explain the difference between RAM and VRAM.", "same": false}
+{"a": "When was the Eiffel Tower completed?", "b": "In what year was the Eiffel Tower finished?", "same": true}
+{"a": "When was the Eiffel Tower completed?", "b": "How tall is the Eiffel Tower?", "same": false}
+{"a": "Suggest a name for a black cat.", "b": "What's a good name for a black cat?", "same": true}
+{"a": "Suggest a name for a black cat.", "b": "Suggest a name for a black dog.", "same": false}

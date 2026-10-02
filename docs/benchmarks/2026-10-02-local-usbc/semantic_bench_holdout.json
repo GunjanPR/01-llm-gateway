@@ -1,0 +1,244 @@
+{
+  "summary": {
+    "timestamp": "2026-10-02T19:59:17+00:00",
+    "model": "llama3.2",
+    "pairs": 20,
+    "paraphrase_hit_rate": 0.8,
+    "paraphrase_hits": "8/10",
+    "false_hits": "0/10",
+    "semantic_hit_latency_ms_median": 101.9,
+    "miss_latency_ms_median": 1771.15,
+    "stage_mean_ms_this_run": {
+      "embed": 21.056731706045046,
+      "search": 1.5622414620138887,
+      "verify": 82.33480727278882
+    },
+    "stage_mean_ms_before_run": {
+      "embed": 19.933227418204616,
+      "search": 1.575695159244201,
+      "verify": 82.41362666659471
+    }
+  },
+  "rows": [
+    {
+      "a": "How far is the Moon from Earth?",
+      "b": "What is the distance between the Earth and the Moon?",
+      "same": true,
+      "first_cache": "MISS",
+      "first_latency_ms": 2936.6,
+      "second_cache": "SEMANTIC_HIT",
+      "second_latency_ms": 104.3,
+      "similarity": 0.9298,
+      "outcome": "correct_hit"
+    },
+    {
+      "a": "How far is the Moon from Earth?",
+      "b": "How far is Mars from Earth?",
+      "same": false,
+      "first_cache": "MISS",
+      "first_latency_ms": 1822.8,
+      "second_cache": "MISS",
+      "second_latency_ms": 1751.1,
+      "similarity": NaN,
+      "outcome": "correct_miss"
+    },
+    {
+      "a": "What is the chemical formula for table salt?",
+      "b": "What's the formula of sodium chloride?",
+      "same": true,
+      "first_cache": "MISS",
+      "first_latency_ms": 629.1,
+      "second_cache": "MISS",
+      "second_latency_ms": 348.1,
+      "similarity": NaN,
+      "outcome": "missed_paraphrase"
+    },
+    {
+      "a": "What is the chemical formula for table salt?",
+      "b": "What is the chemical formula for sugar?",
+      "same": false,
+      "first_cache": "MISS",
+      "first_latency_ms": 602.5,
+      "second_cache": "MISS",
+      "second_latency_ms": 713.6,
+      "similarity": NaN,
+      "outcome": "correct_miss"
+    },
+    {
+      "a": "How do I create a virtual environment in Python?",
+      "b": "What's the command to make a Python venv?",
+      "same": true,
+      "first_cache": "MISS",
+      "first_latency_ms": 1778.4,
+      "second_cache": "MISS",
+      "second_latency_ms": 1763.1,
+      "similarity": NaN,
+      "outcome": "missed_paraphrase"
+    },
+    {
+      "a": "How do I create a virtual environment in Python?",
+      "b": "How do I delete a virtual environment in Python?",
+      "same": false,
+      "first_cache": "MISS",
+      "first_latency_ms": 1776.9,
+      "second_cache": "MISS",
+      "second_latency_ms": 1779.2,
+      "similarity": NaN,
+      "outcome": "correct_miss"
+    },
+    {
+      "a": "Who painted the Mona Lisa?",
+      "b": "Which artist painted the Mona Lisa?",
+      "same": true,
+      "first_cache": "MISS",
+      "first_latency_ms": 548.5,
+      "second_cache": "SEMANTIC_HIT",
+      "second_latency_ms": 99.2,
+      "similarity": 0.9903,
+      "outcome": "correct_hit"
+    },
+    {
+      "a": "Who painted the Mona Lisa?",
+      "b": "Who painted The Starry Night?",
+      "same": false,
+      "first_cache": "MISS",
+      "first_latency_ms": 584.0,
+      "second_cache": "MISS",
+      "second_latency_ms": 757.3,
+      "similarity": NaN,
+      "outcome": "correct_miss"
+    },
+    {
+      "a": "What are the side effects of metformin?",
+      "b": "What side effects can metformin cause?",
+      "same": true,
+      "first_cache": "MISS",
+      "first_latency_ms": 1789.0,
+      "second_cache": "SEMANTIC_HIT",
+      "second_latency_ms": 100.1,
+      "similarity": 0.9834,
+      "outcome": "correct_hit"
+    },
+    {
+      "a": "What are the side effects of metformin?",
+      "b": "What is the usual dose of metformin?",
+      "same": false,
+      "first_cache": "MISS",
+      "first_latency_ms": 1782.1,
+      "second_cache": "MISS",
+      "second_latency_ms": 1787.7,
+      "similarity": NaN,
+      "outcome": "correct_miss"
+    },
+    {
+      "a": "Convert 3 kilograms to pounds.",
+      "b": "How many pounds are in 3 kg?",
+      "same": true,
+      "first_cache": "MISS",
+      "first_latency_ms": 1781.8,
+      "second_cache": "SEMANTIC_HIT",
+      "second_latency_ms": 97.4,
+      "similarity": 0.9221,
+      "outcome": "correct_hit"
+    },
+    {
+      "a": "Convert 3 kilograms to pounds.",
+      "b": "Convert 3 pounds to kilograms.",
+      "same": false,
+      "first_cache": "MISS",
+      "first_latency_ms": 1779.9,
+      "second_cache": "MISS",
+      "second_latency_ms": 1922.9,
+      "similarity": NaN,
+      "outcome": "correct_miss"
+    },
+    {
+      "a": "What is the speed of light in a vacuum?",
+      "b": "How fast does light travel in a vacuum?",
+      "same": true,
+      "first_cache": "MISS",
+      "first_latency_ms": 1792.9,
+      "second_cache": "SEMANTIC_HIT",
+      "second_latency_ms": 102.3,
+      "similarity": 0.9425,
+      "outcome": "correct_hit"
+    },
+    {
+      "a": "What is the speed of light in a vacuum?",
+      "b": "What is the speed of sound in air?",
+      "same": false,
+      "first_cache": "MISS",
+      "first_latency_ms": 1786.4,
+      "second_cache": "MISS",
+      "second_latency_ms": 1789.3,
+      "similarity": NaN,
+      "outcome": "correct_miss"
+    },
+    {
+      "a": "Explain the difference between RAM and ROM.",
+      "b": "How is RAM different from ROM?",
+      "same": true,
+      "first_cache": "MISS",
+      "first_latency_ms": 1794.0,
+      "second_cache": "SEMANTIC_HIT",
+      "second_latency_ms": 101.6,
+      "similarity": 0.9524,
+      "outcome": "correct_hit"
+    },
+    {
+      "a": "Explain the difference between RAM and ROM.",
+      "b": "Explain the difference between RAM and VRAM.",
+      "same": false,
+      "first_cache": "MISS",
+      "first_latency_ms": 1842.7,
+      "second_cache": "MISS",
+      "second_latency_ms": 1841.3,
+      "similarity": NaN,
+      "outcome": "correct_miss"
+    },
+    {
+      "a": "When was the Eiffel Tower completed?",
+      "b": "In what year was the Eiffel Tower finished?",
+      "same": true,
+      "first_cache": "MISS",
+      "first_latency_ms": 1543.2,
+      "second_cache": "SEMANTIC_HIT",
+      "second_latency_ms": 102.2,
+      "similarity": 0.9803,
+      "outcome": "correct_hit"
+    },
+    {
+      "a": "When was the Eiffel Tower completed?",
+      "b": "How tall is the Eiffel Tower?",
+      "same": false,
+      "first_cache": "MISS",
+      "first_latency_ms": 1589.9,
+      "second_cache": "MISS",
+      "second_latency_ms": 751.6,
+      "similarity": NaN,
+      "outcome": "correct_miss"
+    },
+    {
+      "a": "Suggest a name for a black cat.",
+      "b": "What's a good name for a black cat?",
+      "same": true,
+      "first_cache": "MISS",
+      "first_latency_ms": 1795.9,
+      "second_cache": "SEMANTIC_HIT",
+      "second_latency_ms": 104.8,
+      "similarity": 0.9586,
+      "outcome": "correct_hit"
+    },
+    {
+      "a": "Suggest a name for a black cat.",
+      "b": "Suggest a name for a black dog.",
+      "same": false,
+      "first_cache": "MISS",
+      "first_latency_ms": 1859.1,
+      "second_cache": "MISS",
+      "second_latency_ms": 1928.6,
+      "similarity": NaN,
+      "outcome": "correct_miss"
+    }
+  ]
+}

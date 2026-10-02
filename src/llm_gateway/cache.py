@@ -20,8 +20,10 @@ KEY_PREFIX = "llmgw:cache:"
 IGNORED_FIELDS = {"stream", "stream_options", "user"}
 
 
-def cache_key(payload: dict[str, Any]) -> str:
+def cache_key(payload: dict[str, Any], namespace: str = "") -> str:
+    """Key for a request; `namespace` (e.g. the tenant id) keeps entries separate."""
     relevant = {k: v for k, v in payload.items() if k not in IGNORED_FIELDS}
+    relevant["__namespace__"] = namespace
     canonical = json.dumps(relevant, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return KEY_PREFIX + hashlib.sha256(canonical.encode()).hexdigest()
 

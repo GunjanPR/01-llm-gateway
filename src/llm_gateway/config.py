@@ -57,6 +57,8 @@ class Settings(BaseSettings):
     rate_limit_rpm: int = 60
     cache_mode: Literal["all", "deterministic", "off"] = "all"
     cache_ttl_seconds: int = 3600
+    # tenant = cached answers are only reused for the same API key; global = shared
+    cache_scope: Literal["tenant", "global"] = "tenant"
 
     # Ollama
     ollama_base_url: str = "http://localhost:11434"
@@ -77,6 +79,12 @@ class Settings(BaseSettings):
     hosted_cost_per_1k_input: float = 0.0
     hosted_cost_per_1k_output: float = 0.0
     hosted_quality: float = 0.8
+
+    # Semantic cache (needs Redis 8+ / Redis Stack for vector search)
+    semantic_cache_enabled: bool = True
+    semantic_cache_embed_model: str = "nomic-embed-text"
+    semantic_cache_verify_model: str = "llama3.2"  # blank = no verifier (not recommended)
+    semantic_cache_threshold: float = 0.86
 
     # Guardrails
     guardrail_pii: Literal["off", "redact", "block"] = "redact"

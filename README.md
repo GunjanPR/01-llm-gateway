@@ -22,16 +22,65 @@ the [Healthcare RAG](../02-healthcare-rag/) project. Requests can go to local mo
 | Routing policies | `cost` (cheapest $/1K tokens), `latency` (lowest observed EWMA latency), `quality` (highest configured score) |
 | Reliability | Retries with exponential backoff, fallback to the next backend, and a per-backend circuit breaker. Streams fall back only until the first token arrives. Bad requests (400/413/422) go straight back to the client, without retries. |
 | Model aliasing | Maps a public model name to each backend's own name, e.g. `llama3.2` → `llama3.2` on Ollama and `llama-3.1-8b-instant` on Groq, so fallback works across providers |
-| Response cache | Exact-match Redis cache keyed by a SHA-256 of the canonical request. Modes: `all`, `deterministic`, `off`. `Cache-Control: no-cache` bypasses it. |
+| Response cache | Exact-match Redis cache keyed by a SHA-256 of the canonical request. Modes: `all`, `deterministic`, `off`. `Cache-Control: no-cache` bypasses it. Entries are kept separate per API key by default (`CACHE_SCOPE=tenant`). |
+| Semantic cache | Reuses an answer when a new prompt *means* the same as a cached one: `nomic-embed-text` embeddings, Redis 8 vector search (HNSW, cosine), then an LLM verifier. 27/27 paraphrases hit with 0/34 false hits on the tuning set; 8/10 hits with 0/10 false hits on a held-out set. See [Semantic cache](#semantic-cache). |
 | Cost tracking | Token usage from the backend, or estimated if the backend doesn't report it, times $/1K pricing per backend. The cost of each request goes in the `x-gateway-cost-usd` header. |
 | Guardrails | PII redaction (email, phone, SSN, credit card with a Luhn check, IP address) on prompts and responses, and prompt-injection detection (5 rule families). Each can be off, flag/redact, or block; see [Guardrails](#guardrails) |
 | Resilience | If Redis goes down, cache and rate limiting are skipped (fail open) instead of failing requests |
 | Metrics | Prometheus `/metrics`: requests by outcome, latency histograms, TTFT, tokens/s, tokens, spend, cache hits and savings, backend errors, breaker state |
 | Dashboards | A provisioned Grafana dashboard (15 panels), including the gateway's per-request overhead |
 
-Every response carries `x-gateway-backend`, `x-gateway-cache` (`HIT`/`MISS`/`BYPASS`),
+Every response carries `x-gateway-backend`, `x-gateway-cache` (`HIT`/`SEMANTIC_HIT`/`MISS`/`BYPASS`; semantic hits also send `x-gateway-similarity`),
 `x-gateway-cost-usd` and `x-gateway-latency-ms` headers, plus `x-gateway-guardrails` (e.g.
 `pii_email=1,injection=ignore_instructions`) when a guardrail fires.
+
+### Semantic cache
+
+The exact cache only helps when a prompt repeats character for character. The semantic
+cache also catches rewordings, in two stages:
+
+1. **Candidate search.** Embed the last user message with `nomic-embed-text` (using the
+   `search_query:` prefix) and find the nearest stored prompt with Redis KNN. The search is
+   limited to the same *scope*: same API key, model, sampling parameters and earlier
+   conversation. The match needs cosine similarity of at least `SEMANTIC_CACHE_THRESHOLD`
+   (0.86).
+2. **Verification.** `llama3.2` (3B) answers YES/NO to "do these two requests need the same
+   answer?", using six few-shot examples. Only a YES is served from the cache. At the 0.86 threshold, stage 1 passes all 27
+   paraphrases and 17 of 34 near-misses, and the verifier has to reject those 17.
+
+**Why the verifier is needed.** On 61 hand-labelled pairs
+([eval/semantic_pairs.jsonl](eval/semantic_pairs.jsonl)), *no similarity threshold* is safe on
+its own. "Convert 100 Fahrenheit to Celsius" vs "Convert 100 Celsius to Fahrenheit" scores
+**0.996**, higher than almost every true paraphrase. Similarity alone would serve the wrong
+conversion. The verifier was chosen by measurement:
+
+| Verifier on the 61 pairs | Paraphrases accepted | Near-misses accepted (wrong answers) | p50 latency |
+|---|---|---|---|
+| none: threshold 0.92 | 21/27 | 2/34 | – |
+| none: threshold 0.93 (no threshold reaches 0 false hits) | 18/27 | 1/34 | – |
+| `llama3.2:1b`, few-shot | 19/27 | **26/34** | 38 ms |
+| `llama3.2` (3B), zero-shot "strict" prompt | 2/27 | 0/34 | 69 ms |
+| **`llama3.2` (3B), few-shot (shipped)** | **27/27** | **0/34** | 68 ms |
+
+**End-to-end through the gateway** ([scripts/semantic_bench.py](scripts/semantic_bench.py)): each
+pair runs in its own conversation scope. Prompt A is generated and cached, then prompt B is
+sent.
+
+| Set | Paraphrase hits | False hits | Semantic-hit latency (median) | Miss latency (median, 48-token answer) |
+|---|---|---|---|---|
+| 61 pairs used to choose the threshold and prompt | 27/27 (100%) | 0/34 | 103 ms | 1.77 s |
+| **20 held-out pairs, written after the design was fixed** | **8/10 (80%)** | **0/10** | 102 ms | 1.77 s |
+
+On the held-out set, the two missed paraphrases ("table salt" vs "sodium chloride", and a
+venv question) are safe misses: the model simply answers again. Treat the held-out
+numbers as the realistic estimate. 30 test pairs is a small sample.
+
+**Cost per lookup** (means): embedding 20 ms + vector search 1.6 ms on every cacheable miss,
+plus verification 82 ms when a candidate is found. Any failure, such as Redis without vector
+search, an embedding error or a verifier error, counts as a miss, never as a failed request.
+Settings: `SEMANTIC_CACHE_ENABLED`, `SEMANTIC_CACHE_THRESHOLD`, `SEMANTIC_CACHE_EMBED_MODEL`,
+`SEMANTIC_CACHE_VERIFY_MODEL`. Metrics: `llmgw_semantic_cache_total{outcome}`,
+`llmgw_semantic_cache_seconds{stage}`, `llmgw_semantic_similarity`.
 
 ### Guardrails
 
@@ -56,7 +105,7 @@ added latency. Embedding requests aren't guarded, so RAG documents keep their or
 | Layer | Tools |
 |---|---|
 | API | FastAPI (async), Uvicorn, httpx |
-| Cache / rate limits | Redis 7 |
+| Cache / rate limits | Redis 8 (includes vector search for the semantic cache) |
 | Model backends | Ollama (native, GPU), vLLM, any OpenAI-compatible hosted API (e.g. Groq) |
 | Observability | Prometheus, Grafana |
 | Load testing | `scripts/bench.py` (async httpx: p50/p95/p99, TTFT, throughput) |
@@ -240,7 +289,7 @@ node is killed mid-run. Results are written to `/kaggle/working/results/`: `summ
 ### Results: local, RTX 4050 Laptop at a 20 W cap (measured 2026-10-02)
 
 Setup: Windows 11, Ollama 0.35.0 with `llama3.2` (3B) fully on the GPU, the gateway on the
-host (Python 3.11), and Redis 7 in Docker Desktop. The gateway rate limiter was off and the
+host (Python 3.11), and Redis in Docker Desktop. The gateway rate limiter was off and the
 cache was bypassed (`Cache-Control: no-cache`) except in the cache run. Direct and gateway
 runs alternated. **0 errors across 920 benchmark requests.**
 
@@ -323,13 +372,14 @@ Milestones follow [SHARED_STANDARDS.md](../SHARED_STANDARDS.md). Each one has a 
 ### M3: Data / storage layer
 - [x] Redis per-tenant rate limiting (fixed one-minute window)
 - [x] Exact-match response cache (Redis, TTL, modes)
-- [ ] Semantic cache (embedding similarity)
+- [x] Semantic cache: embeddings + Redis vector search + LLM verifier, evaluated on tuning and held-out pairs
+- [x] Per-tenant cache isolation (`CACHE_SCOPE=tenant` default)
 - [ ] Usage / cost ledger per tenant (PostgreSQL)
 
 ### M4: Evaluation & testing
-- [x] Unit tests for router, limiter, cache, config, guardrails and API (67 tests)
+- [x] Unit tests for router, limiter, caches, config, guardrails and API (76 tests)
 - [x] Integration tests against the real stack written (`tests/integration/`)
-- [x] Integration tests run green against real Ollama + Redis (5/5)
+- [x] Integration tests run green against real Ollama + Redis (7/7)
 - [x] Benchmark harness (`scripts/bench.py`) with a direct-to-backend baseline
 - [x] Failover harness (`scripts/failover.py`) for killing a backend under load
 - [x] Kaggle notebook to reproduce benchmarks + failover on a free T4 GPU
@@ -361,6 +411,7 @@ Milestones follow [SHARED_STANDARDS.md](../SHARED_STANDARDS.md). Each one has a 
 01-llm-gateway/
 ├── src/llm_gateway/
 │   ├── guardrails.py      # PII redaction, prompt-injection detection
+│   ├── semantic_cache.py  # embeddings + Redis vector search + LLM verifier
 │   ├── __main__.py        # python -m llm_gateway
 │   ├── main.py            # FastAPI app factory + routes
 │   ├── router.py          # policy ranking, retries, fallback, circuit breaker
@@ -373,6 +424,9 @@ Milestones follow [SHARED_STANDARDS.md](../SHARED_STANDARDS.md). Each one has a 
 ├── scripts/bench.py       # load test / benchmark
 ├── scripts/failover.py    # availability while a backend is killed
 ├── scripts/guardrail_bench.py  # guardrail latency by prompt size
+├── scripts/semantic_threshold.py  # similarity distribution of labelled pairs
+├── scripts/semantic_bench.py      # end-to-end semantic cache evaluation
+├── eval/                  # labelled prompt pairs (tuning + held-out)
 ├── notebooks/kaggle_benchmark.ipynb  # reproducible GPU benchmark on Kaggle
 ├── deploy/                # Prometheus config, Grafana provisioning + dashboard
 ├── .github/workflows/ci.yml

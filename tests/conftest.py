@@ -131,6 +131,7 @@ def settings() -> Settings:
         retry_backoff_seconds=0,
         backend_max_retries=1,
         default_model="llama3.2",
+        semantic_cache_enabled=False,  # enabled per test in test_semantic_cache.py
     )
 
 
@@ -145,8 +146,15 @@ def client_factory(
 ) -> Iterator[Callable[..., TestClient]]:
     clients: list[TestClient] = []
 
-    def factory(backends: list[OpenAICompatibleBackend], **overrides: Any) -> TestClient:
-        app = create_app(settings.model_copy(update=overrides), backends=backends, redis=redis)
+    def factory(
+        backends: list[OpenAICompatibleBackend], vector_index: Any = None, **overrides: Any
+    ) -> TestClient:
+        app = create_app(
+            settings.model_copy(update=overrides),
+            backends=backends,
+            redis=redis,
+            vector_index=vector_index,
+        )
         client = TestClient(app)
         client.__enter__()
         clients.append(client)

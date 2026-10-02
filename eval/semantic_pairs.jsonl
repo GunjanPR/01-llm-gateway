@@ -1,0 +1,61 @@
+{"a": "What is the capital of France?", "b": "Which city is the capital of France?", "same": true}
+{"a": "What is the capital of France?", "b": "What is the capital of Germany?", "same": false}
+{"a": "How do I reverse a list in Python?", "b": "What's the way to reverse a Python list?", "same": true}
+{"a": "How do I reverse a list in Python?", "b": "How do I sort a list in Python?", "same": false}
+{"a": "How do I reverse a list in Python?", "b": "How do I reverse a string in JavaScript?", "same": false}
+{"a": "Explain what a KV cache is in LLM inference.", "b": "What is a KV cache in large language model inference?", "same": true}
+{"a": "Explain what a KV cache is in LLM inference.", "b": "Explain what a CPU cache is.", "same": false}
+{"a": "What are the symptoms of type 2 diabetes?", "b": "What symptoms does type 2 diabetes cause?", "same": true}
+{"a": "What are the symptoms of type 2 diabetes?", "b": "What are the symptoms of type 1 diabetes?", "same": false}
+{"a": "What are the symptoms of type 2 diabetes?", "b": "How is type 2 diabetes treated?", "same": false}
+{"a": "Summarize the causes of World War I.", "b": "Give me a summary of what caused the First World War.", "same": true}
+{"a": "Summarize the causes of World War I.", "b": "Summarize the causes of World War II.", "same": false}
+{"a": "Convert 100 Fahrenheit to Celsius.", "b": "What is 100 degrees F in Celsius?", "same": true}
+{"a": "Convert 100 Fahrenheit to Celsius.", "b": "Convert 100 Celsius to Fahrenheit.", "same": false}
+{"a": "Convert 100 Fahrenheit to Celsius.", "b": "Convert 90 Fahrenheit to Celsius.", "same": false}
+{"a": "What does BRCA1 do?", "b": "What is the function of the BRCA1 gene?", "same": true}
+{"a": "What does BRCA1 do?", "b": "What does BRCA2 do?", "same": false}
+{"a": "Write a haiku about autumn.", "b": "Compose a haiku on the theme of autumn.", "same": true}
+{"a": "Write a haiku about autumn.", "b": "Write a haiku about spring.", "same": false}
+{"a": "Write a haiku about autumn.", "b": "Write a limerick about autumn.", "same": false}
+{"a": "What is the difference between TCP and UDP?", "b": "How does TCP differ from UDP?", "same": true}
+{"a": "What is the difference between TCP and UDP?", "b": "What is the difference between HTTP and HTTPS?", "same": false}
+{"a": "How many legs does a spider have?", "b": "How many legs do spiders have?", "same": true}
+{"a": "How many legs does a spider have?", "b": "How many legs does an insect have?", "same": false}
+{"a": "Who wrote Pride and Prejudice?", "b": "Who is the author of Pride and Prejudice?", "same": true}
+{"a": "Who wrote Pride and Prejudice?", "b": "Who wrote Sense and Sensibility?", "same": false}
+{"a": "What is gradient descent?", "b": "Can you explain gradient descent?", "same": true}
+{"a": "What is gradient descent?", "b": "What is stochastic gradient descent with momentum?", "same": false}
+{"a": "Translate 'good morning' into Spanish.", "b": "How do you say 'good morning' in Spanish?", "same": true}
+{"a": "Translate 'good morning' into Spanish.", "b": "Translate 'good morning' into French.", "same": false}
+{"a": "Translate 'good morning' into Spanish.", "b": "Translate 'good night' into Spanish.", "same": false}
+{"a": "What is the boiling point of water at sea level?", "b": "At sea level, what temperature does water boil at?", "same": true}
+{"a": "What is the boiling point of water at sea level?", "b": "What is the freezing point of water at sea level?", "same": false}
+{"a": "List three benefits of regular exercise.", "b": "Name three advantages of exercising regularly.", "same": true}
+{"a": "List three benefits of regular exercise.", "b": "List three risks of excessive exercise.", "same": false}
+{"a": "How do vaccines work?", "b": "Explain how vaccines work.", "same": true}
+{"a": "How do vaccines work?", "b": "How do antibiotics work?", "same": false}
+{"a": "What is the time complexity of binary search?", "b": "What's the big-O complexity of binary search?", "same": true}
+{"a": "What is the time complexity of binary search?", "b": "What is the time complexity of linear search?", "same": false}
+{"a": "What is the time complexity of binary search?", "b": "What is the space complexity of binary search?", "same": false}
+{"a": "Is a tomato a fruit or a vegetable?", "b": "Should a tomato be classified as a fruit or a vegetable?", "same": true}
+{"a": "Is a tomato a fruit or a vegetable?", "b": "Is a cucumber a fruit or a vegetable?", "same": false}
+{"a": "What causes the seasons on Earth?", "b": "Why does Earth have seasons?", "same": true}
+{"a": "What causes the seasons on Earth?", "b": "What causes tides on Earth?", "same": false}
+{"a": "Give me a recipe for pancakes.", "b": "How do I make pancakes?", "same": true}
+{"a": "Give me a recipe for pancakes.", "b": "Give me a recipe for waffles.", "same": false}
+{"a": "Give me a recipe for pancakes.", "b": "Give me a gluten-free recipe for pancakes.", "same": false}
+{"a": "What year did the Berlin Wall fall?", "b": "When did the Berlin Wall come down?", "same": true}
+{"a": "What year did the Berlin Wall fall?", "b": "What year was the Berlin Wall built?", "same": false}
+{"a": "Define photosynthesis.", "b": "What is photosynthesis?", "same": true}
+{"a": "Define photosynthesis.", "b": "Define cellular respiration.", "same": false}
+{"a": "How do I center a div in CSS?", "b": "What's the best way to center a div with CSS?", "same": true}
+{"a": "How do I center a div in CSS?", "b": "How do I center text in CSS?", "same": false}
+{"a": "What is the population of Japan?", "b": "How many people live in Japan?", "same": true}
+{"a": "What is the population of Japan?", "b": "What is the population of China?", "same": false}
+{"a": "Recommend a good book on machine learning.", "b": "Can you suggest a good machine learning book?", "same": true}
+{"a": "Recommend a good book on machine learning.", "b": "Recommend a good course on machine learning.", "same": false}
+{"a": "What's the square root of 144?", "b": "What is the square root of 144?", "same": true}
+{"a": "What's the square root of 144?", "b": "What's the square root of 169?", "same": false}
+{"a": "Is it safe to take ibuprofen with alcohol?", "b": "Can I take ibuprofen if I've been drinking alcohol?", "same": true}
+{"a": "Is it safe to take ibuprofen with alcohol?", "b": "Is it safe to take acetaminophen with alcohol?", "same": false}

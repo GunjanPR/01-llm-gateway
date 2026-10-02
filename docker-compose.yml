@@ -17,7 +17,7 @@ services:
         condition: service_healthy
 
   redis:
-    image: redis:7-alpine
+    image: redis:8-alpine  # 8+ includes vector search (semantic cache)
     ports: ["6379:6379"]
     command: ["redis-server", "--save", "60", "1", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
     volumes: ["redis-data:/data"]
