@@ -13,6 +13,8 @@ from llm_gateway.guardrails import detect_injection, redact_pii, redact_response
         ("card 4111-1111-1111-1111", "CREDIT_CARD"),
         ("call (302) 555-0142 tomorrow", "PHONE"),
         ("call +1 302-555-0142", "PHONE"),
+        ("call 302.555.0142", "PHONE"),
+        ("call (302)555-0142", "PHONE"),
         ("server at 192.168.10.24 is down", "IP_ADDRESS"),
     ],
 )
@@ -30,6 +32,8 @@ def test_redacts_each_pii_kind(text, kind):
         "Order 1234567890123 shipped",  # 13 digits but fails the Luhn check
         "BRCA1 c.68_69delAG is pathogenic",
         "SSN-like but invalid: 000-12-3456",
+        "Unix time 1790971234 and PMID 38291045",
+        "Order 3025550142 shipped",
     ],
 )
 def test_no_false_positives_on_ordinary_text(text):

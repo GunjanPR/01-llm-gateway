@@ -29,7 +29,8 @@ the [Healthcare RAG](../02-healthcare-rag/) project. Requests can go to local mo
 | Guardrails | PII redaction (email, phone, SSN, credit card with a Luhn check, IP address) on prompts and responses, and prompt-injection detection (5 rule families). Each can be off, flag/redact, or block; see [Guardrails](#guardrails) |
 | Resilience | If Redis goes down, cache and rate limiting are skipped (fail open) instead of failing requests |
 | Metrics | Prometheus `/metrics`: requests by outcome, latency histograms, TTFT, tokens/s, tokens, spend, cache hits and savings, backend errors, breaker state |
-| Dashboards | A provisioned Grafana dashboard (15 panels), including the gateway's per-request overhead |
+| Dashboards | A provisioned Grafana dashboard (18 panels), including per-request gateway overhead, semantic cache outcomes and guardrail events |
+| Tracing | OpenTelemetry: one trace per request in Jaeger, with spans for guardrails, the exact cache, semantic embed/search/verify, every router attempt, the backend HTTP call and each Redis command. `x-trace-id` on every response; the trace id is also stored in the usage ledger. |
 
 Every response carries `x-gateway-backend`, `x-gateway-cache` (`HIT`/`SEMANTIC_HIT`/`MISS`/`BYPASS`; semantic hits also send `x-gateway-similarity`),
 `x-gateway-cost-usd` and `x-gateway-latency-ms` headers, plus `x-gateway-guardrails` (e.g.
@@ -82,6 +83,33 @@ search, an embedding error or a verifier error, counts as a miss, never as a fai
 Settings: `SEMANTIC_CACHE_ENABLED`, `SEMANTIC_CACHE_THRESHOLD`, `SEMANTIC_CACHE_EMBED_MODEL`,
 `SEMANTIC_CACHE_VERIFY_MODEL`. Metrics: `llmgw_semantic_cache_total{outcome}`,
 `llmgw_semantic_cache_seconds{stage}`, `llmgw_semantic_similarity`.
+
+### Tracing
+
+With `OTEL_EXPORTER_OTLP_ENDPOINT` set (Jaeger from Docker Compose at `http://localhost:4318`),
+every request is exported as a trace over OTLP/HTTP:
+
+- **Auto-instrumented:** the FastAPI server span, every httpx call to a backend, every Redis
+  command (including `FT.SEARCH`).
+- **Gateway spans:** `guardrails.input`, `cache.exact.lookup`, `semantic_cache.embed`,
+  `semantic_cache.search`, `semantic_cache.verify`, and one `router.attempt` per backend try,
+  with `llmgw.backend` and `llmgw.attempt`. A failed attempt is marked with error status, so
+  retries and fallbacks show up directly in the trace.
+- **Request attributes:** GenAI semantic conventions (`gen_ai.request.model`,
+  `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`) plus `llmgw.cache`,
+  `llmgw.backend`, `llmgw.cost_usd` and `llmgw.tenant` (hashed).
+- **Correlation:** the response's `x-trace-id` header and the ledger row's `trace_id` column
+  hold the same id, so a slow or failed row in `usage_events` links straight to its trace.
+
+![Jaeger trace of a semantic cache hit](docs/jaeger-trace-semantic-hit.png)
+
+*A semantic cache hit in Jaeger (480 ms in total): guardrails 1 ms, exact cache lookup 1 ms,
+embedding 33 ms, vector search 1 ms, then the verifier. The verifier call here was cold, at
+442 ms; across the 61-pair run it averaged 82 ms.*
+
+**Measured cost:** with tracing on, client-side overhead on 1-token requests was +4.3 ms at p50
+(43.1 → 47.4 ms, 3×100 alternating requests), versus +4.2 ms without tracing, so no
+measurable change.
 
 ### Usage ledger
 
@@ -139,7 +167,7 @@ added latency. Embedding requests aren't guarded, so RAG documents keep their or
 | API | FastAPI (async), Uvicorn, httpx |
 | Cache / rate limits | Redis 8 (includes vector search for the semantic cache) |
 | Model backends | Ollama (native, GPU), vLLM, any OpenAI-compatible hosted API (e.g. Groq) |
-| Observability | Prometheus, Grafana |
+| Observability | Prometheus, Grafana, OpenTelemetry → Jaeger |
 | Load testing | `scripts/bench.py` (async httpx: p50/p95/p99, TTFT, throughput) |
 | Usage ledger | PostgreSQL 16 (asyncpg, batched `COPY`) |
 | Infra | Docker, Docker Compose, GitHub Actions |
@@ -225,7 +253,7 @@ Every variable is documented in [.env.example](.env.example). The ones you'll mo
 
 ### 1. Start the infrastructure (Redis, Prometheus, Grafana)
 ```bash
-make up                 # = docker compose up -d redis postgres prometheus grafana
+make up                 # = docker compose up -d redis postgres jaeger prometheus grafana
 ```
 
 ### 2. Start the gateway
@@ -260,6 +288,7 @@ client.chat.completions.create(model="llama3.2", messages=[{"role": "user", "con
 | http://localhost:8000/docs | OpenAPI UI |
 | http://localhost:9090 | Prometheus |
 | http://localhost:8000/v1/usage | Your API key's usage per model (needs `LEDGER_DATABASE_URL`) |
+| http://localhost:16686 | Jaeger: traces for service `llm-gateway` (search by the `x-trace-id` header) |
 | http://localhost:3000 | Grafana: **LLM Gateway** dashboard (admin password from `GRAFANA_ADMIN_PASSWORD`) |
 
 ### Tests
@@ -413,7 +442,7 @@ Milestones follow [SHARED_STANDARDS.md](../SHARED_STANDARDS.md). Each one has a 
 - [x] Usage / cost ledger per tenant (PostgreSQL, batched background writes, `/v1/usage`)
 
 ### M4: Evaluation & testing
-- [x] Unit tests for router, limiter, caches, config, guardrails and API (84 tests)
+- [x] Unit tests for router, limiter, caches, config, guardrails and API (90 tests)
 - [x] Integration tests against the real stack written (`tests/integration/`)
 - [x] Integration tests run green against real Ollama + Redis (8/8)
 - [x] Benchmark harness (`scripts/bench.py`) with a direct-to-backend baseline
@@ -427,7 +456,7 @@ Milestones follow [SHARED_STANDARDS.md](../SHARED_STANDARDS.md). Each one has a 
 - [x] Grafana dashboard provisioned (`deploy/grafana/`)
 - [x] Dashboard verified with live traffic (screenshot in README)
 - [x] In-process gateway overhead histogram (`llmgw_gateway_overhead_seconds`)
-- [ ] OpenTelemetry tracing
+- [x] OpenTelemetry tracing to Jaeger (gateway, router, cache, guardrail, httpx and Redis spans; trace id in headers and ledger)
 
 ### M6: Containerization & CI/CD
 - [x] Dockerfile and `docker-compose.yml` (gateway, Redis, Prometheus, Grafana; optional Ollama profile)
@@ -449,6 +478,7 @@ Milestones follow [SHARED_STANDARDS.md](../SHARED_STANDARDS.md). Each one has a 
 │   ├── guardrails.py      # PII redaction, prompt-injection detection
 │   ├── semantic_cache.py  # embeddings + Redis vector search + LLM verifier
 │   ├── ledger.py          # PostgreSQL usage ledger (queued, batched writes)
+│   ├── tracing.py         # OpenTelemetry setup and helpers
 │   ├── __main__.py        # python -m llm_gateway
 │   ├── main.py            # FastAPI app factory + routes
 │   ├── router.py          # policy ranking, retries, fallback, circuit breaker

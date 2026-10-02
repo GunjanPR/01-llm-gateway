@@ -10,6 +10,7 @@ services:
         required: false
     environment:
       REDIS_URL: redis://redis:6379/0
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
       LEDGER_DATABASE_URL: postgresql://llmgw:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/llmgw
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL_DOCKER:-http://host.docker.internal:11434}
     extra_hosts: ["host.docker.internal:host-gateway"]
@@ -41,6 +42,12 @@ services:
       test: ["CMD", "pg_isready", "-U", "llmgw", "-d", "llmgw"]
       interval: 5s
       retries: 10
+
+  jaeger:
+    image: jaegertracing/jaeger:2.4.0
+    ports:
+      - "16686:16686"  # UI
+      - "4318:4318"    # OTLP/HTTP from the gateway
 
   prometheus:
     image: prom/prometheus:v2.54.1

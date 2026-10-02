@@ -6,8 +6,11 @@ from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Protocol, TypeVar
 
+from opentelemetry.trace import Status, StatusCode, use_span
+
 from llm_gateway.backends import BackendError
 from llm_gateway.config import BackendConfig
+from llm_gateway.tracing import get_tracer
 
 T = TypeVar("T")
 
@@ -114,13 +117,24 @@ class Router:
         """Run `op` on the best backend, retrying and then falling back on failure."""
         errors: list[BackendError] = []
         skip: set[str] = set()
-        async for backend, _ in self._attempts(model):
+        async for backend, attempt in self._attempts(model):
             if backend.name in skip:
                 continue
             start = time.perf_counter()
+            span = get_tracer().start_span(
+                "router.attempt",
+                attributes={
+                    "llmgw.backend": backend.name,
+                    "llmgw.attempt": attempt,
+                    "gen_ai.request.model": model,
+                },
+            )
             try:
-                result = await op(backend)
+                with use_span(span, end_on_exit=False):
+                    result = await op(backend)
             except BackendError as exc:
+                span.set_status(Status(StatusCode.ERROR, exc.kind))
+                span.end()
                 if exc.is_client_error:
                     raise
                 self.record_failure(backend, exc)
@@ -128,6 +142,7 @@ class Router:
                 if not self.is_available(backend):
                     skip.add(backend.name)
                 continue
+            span.end()
             self.record_success(backend, time.perf_counter() - start)
             return result, backend
         raise NoBackendAvailable(model, errors)
@@ -142,13 +157,23 @@ class Router:
         """
         errors: list[BackendError] = []
         skip: set[str] = set()
-        async for backend, _ in self._attempts(model):
+        async for backend, attempt in self._attempts(model):
             if backend.name in skip:
                 continue
             start = time.perf_counter()
+            span = get_tracer().start_span(
+                "router.attempt",
+                attributes={
+                    "llmgw.backend": backend.name,
+                    "llmgw.attempt": attempt,
+                    "llmgw.stream": True,
+                    "gen_ai.request.model": model,
+                },
+            )
             stream = backend.chat_stream(payload)
             try:
-                first = await anext(stream)
+                with use_span(span, end_on_exit=False):
+                    first = await anext(stream)
             except StopAsyncIteration:
                 exc = BackendError(backend.name, "stream ended before any data", 502)
             except BackendError as err:
@@ -157,8 +182,12 @@ class Router:
                 exc = err
             else:
                 ttft = time.perf_counter() - start
+                span.set_attribute("llmgw.ttft_ms", ttft * 1000)
+                span.end()
                 self.record_success(backend, ttft)
                 return backend, _prepend(first, stream), ttft
+            span.set_status(Status(StatusCode.ERROR, exc.kind))
+            span.end()
             await stream.aclose()
             self.record_failure(backend, exc)
             errors.append(exc)

@@ -14,6 +14,7 @@ from typing import Any
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from opentelemetry import trace
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from redis.asyncio import Redis
 
@@ -33,6 +34,7 @@ from llm_gateway.metrics import (
 from llm_gateway.ratelimit import RateLimiter
 from llm_gateway.router import Backend, NoBackendAvailable, Router
 from llm_gateway.semantic_cache import RedisVectorIndex, SemanticCache, SemanticLookup, VectorIndex
+from llm_gateway.tracing import current_trace_id, get_tracer, setup_tracing
 
 logger = logging.getLogger("llm_gateway")
 
@@ -65,6 +67,7 @@ def create_app(
     redis: Redis | None = None,
     vector_index: VectorIndex | None = None,
     ledger_writer: Writer | None = None,
+    span_exporter: Any = None,
 ) -> FastAPI:
     settings = settings or get_settings()
     logging.basicConfig(level=settings.log_level.upper())
@@ -149,9 +152,12 @@ def create_app(
     async def request_log(request: Request, call_next):
         """Tag every response with a request id and write its usage row."""
         request.state.request_id = uuid.uuid4()
+        trace_id = current_trace_id()
         start = time.perf_counter()
         response = await call_next(request)
         response.headers["x-request-id"] = str(request.state.request_id)
+        if trace_id:
+            response.headers["x-trace-id"] = trace_id
         usage = getattr(request.state, "usage", None)
         if ledger and usage is not None and not usage.pop("deferred", False):
             ledger.record(
@@ -159,6 +165,7 @@ def create_app(
                     id=request.state.request_id,
                     status=response.status_code,
                     latency_ms=(time.perf_counter() - start) * 1000,
+                    trace_id=trace_id,
                     **usage,
                 )
             )
@@ -214,11 +221,14 @@ def create_app(
     def guard_input(payload: dict[str, Any], usage: dict[str, Any]) -> GuardrailReport:
         """Redact PII and check for prompt injection; raise if policy says block."""
         t0 = time.perf_counter()
-        messages, report = scan_messages(
-            payload["messages"],
-            redact=settings.guardrail_pii != "off",
-            check_injection=settings.guardrail_injection != "off",
-        )
+        with get_tracer().start_as_current_span("guardrails.input") as span:
+            messages, report = scan_messages(
+                payload["messages"],
+                redact=settings.guardrail_pii != "off",
+                check_injection=settings.guardrail_injection != "off",
+            )
+            if report.header:
+                span.set_attribute("llmgw.guardrails", report.header)
         metrics.guardrail_seconds.labels("input").observe(time.perf_counter() - t0)
         usage["guardrails"] = report.header or None
         for kind, n in report.pii.items():
@@ -320,7 +330,12 @@ def create_app(
         cacheable = is_cacheable(payload, settings.cache_mode) and not bypass
         namespace = tenant_id if settings.cache_scope == "tenant" else ""
         key = cache_key(payload, namespace) if cacheable else None
-        if key and (hit := await cache.get(key)):
+        hit = None
+        if key:
+            with get_tracer().start_as_current_span("cache.exact.lookup") as span:
+                hit = await cache.get(key)
+                span.set_attribute("llmgw.cache.hit", hit is not None)
+        if hit:
             metrics.cache.labels("hit").inc()
             metrics.requests.labels("chat", model, "cache_hit").inc()
             metrics.saved_tokens.labels(model).inc(hit["prompt_tokens"] + hit["completion_tokens"])
@@ -328,6 +343,7 @@ def create_app(
             elapsed = time.perf_counter() - start
             metrics.latency.labels("chat", model, hit["backend"], "hit").observe(elapsed)
             usage.update(backend=hit["backend"], cache="HIT")
+            _annotate_span(usage)
             return JSONResponse(
                 hit["response"],
                 headers=_headers(hit["backend"], "HIT", 0.0, elapsed, report),
@@ -351,6 +367,7 @@ def create_app(
                 headers = _headers(hit["backend"], "SEMANTIC_HIT", 0.0, elapsed, report)
                 headers["x-gateway-similarity"] = f"{lookup.similarity:.4f}"
                 usage.update(backend=hit["backend"], cache="SEMANTIC_HIT")
+                _annotate_span(usage)
                 return JSONResponse(hit["response"], headers=headers)
 
         routed = time.perf_counter()
@@ -393,6 +410,7 @@ def create_app(
             completion_tokens=completion,
             cost_usd=cost,
         )
+        _annotate_span(usage)
         return JSONResponse(
             response, headers=_headers(backend.name, cache_state, cost, elapsed, report)
         )
@@ -411,6 +429,7 @@ def create_app(
         # The row is written when the stream ends, once token counts are known.
         row = request.state.usage
         row["deferred"] = True
+        row["trace_id"] = current_trace_id()
 
         async def body() -> AsyncIterator[bytes]:
             text: list[str] = []
@@ -453,6 +472,7 @@ def create_app(
                             cost_usd=cost,
                             latency_ms=(time.perf_counter() - request.state.received) * 1000,
                             guardrails=row.get("guardrails"),
+                            trace_id=row.get("trace_id"),
                         )
                     )
                 if completion and elapsed > ttft:
@@ -497,6 +517,14 @@ def create_app(
         )
         return JSONResponse(response, headers=_headers(backend.name, "BYPASS", cost, elapsed))
 
+    setup_tracing(
+        app,
+        clients=[b._client for b in backends if hasattr(b, "_client")],
+        endpoint=settings.otel_exporter_otlp_endpoint,
+        service_name=settings.otel_service_name,
+        exporter=span_exporter,
+    )
+
     @app.get("/v1/usage")
     async def usage_summary(tenant_id: str = Depends(tenant), days: int = 30) -> dict[str, Any]:
         """The caller's own usage over the last `days` days, per model."""
@@ -525,6 +553,18 @@ def create_app(
         return {"tenant": tenant_id, "since": since.isoformat(), "totals": totals, "models": rows}
 
     return app
+
+
+def _annotate_span(usage: dict[str, Any]) -> None:
+    """Put the request outcome on the server span (GenAI semantic conventions)."""
+    span = trace.get_current_span()
+    span.set_attribute("gen_ai.request.model", usage.get("model", "-"))
+    span.set_attribute("gen_ai.usage.input_tokens", usage.get("prompt_tokens", 0))
+    span.set_attribute("gen_ai.usage.output_tokens", usage.get("completion_tokens", 0))
+    span.set_attribute("llmgw.cache", usage.get("cache") or "-")
+    span.set_attribute("llmgw.backend", usage.get("backend") or "-")
+    span.set_attribute("llmgw.tenant", usage.get("tenant", "-"))
+    span.set_attribute("llmgw.cost_usd", usage.get("cost_usd", 0.0))
 
 
 def _completion_text(response: dict[str, Any]) -> str:

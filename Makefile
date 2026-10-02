@@ -29,7 +29,7 @@ run:
 
 # Redis + PostgreSQL + Prometheus + Grafana in Docker, for use with `make run`
 up:
-	docker compose up -d redis postgres prometheus grafana
+	docker compose up -d redis postgres jaeger prometheus grafana
 
 # Everything in Docker, including the gateway
 up-all:

@@ -32,8 +32,10 @@ CREATE TABLE IF NOT EXISTS usage_events (
     completion_tokens integer NOT NULL DEFAULT 0,
     cost_usd          double precision NOT NULL DEFAULT 0,
     latency_ms        double precision NOT NULL,
-    guardrails        text
+    guardrails        text,
+    trace_id          text
 );
+ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS trace_id text;
 CREATE INDEX IF NOT EXISTS usage_events_tenant_ts ON usage_events (tenant, ts DESC);
 """
 
@@ -67,6 +69,7 @@ class UsageEvent:
     completion_tokens: int = 0
     cost_usd: float = 0.0
     guardrails: str | None = None
+    trace_id: str | None = None
     id: uuid.UUID = field(default_factory=uuid.uuid4)
     ts: datetime = field(default_factory=lambda: datetime.now(UTC))
 

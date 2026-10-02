@@ -97,6 +97,10 @@ class Settings(BaseSettings):
     guardrail_output_pii: Literal["off", "redact"] = "redact"
     guardrail_injection: Literal["off", "flag", "block"] = "flag"
 
+    # Tracing (OTLP/HTTP, e.g. Jaeger at http://localhost:4318); blank disables
+    otel_exporter_otlp_endpoint: str = ""
+    otel_service_name: str = "llm-gateway"
+
     # Routing
     default_model: str = "llama3.2"
     routing_policy: Literal["cost", "latency", "quality"] = "cost"

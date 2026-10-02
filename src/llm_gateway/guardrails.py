@@ -18,9 +18,10 @@ PII_PATTERNS: dict[str, re.Pattern[str]] = {
     "SSN": re.compile(r"\b(?!000|666|9\d\d)\d{3}-(?!00)\d{2}-(?!0000)\d{4}\b"),
     "CREDIT_CARD": re.compile(r"\b(?:\d[ -]?){12,18}\d\b"),
     "PHONE": re.compile(
-        # Country code needs "+" or a separator, so long digit runs (IDs) don't match.
+        # Needs a separator or parentheses after the area code, and "+" or a separator after a
+        # country code, so bare digit runs (IDs, Unix timestamps) are not treated as phones.
         r"(?<![\w-])(?:\+\d{1,3}[ .-]?|\d{1,3}[ .-])?"
-        r"(?:\(\d{3}\)|\d{3})[ .-]?\d{3}[ .-]?\d{4}(?![\w-])"
+        r"(?:\(\d{3}\)[ .-]?|\d{3}[ .-])\d{3}[ .-]?\d{4}(?![\w-])"
     ),
     "IP_ADDRESS": re.compile(
         r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b"

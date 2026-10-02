@@ -33,6 +33,7 @@ from redis.exceptions import RedisError, ResponseError
 from llm_gateway.backends import BackendError
 from llm_gateway.cache import IGNORED_FIELDS
 from llm_gateway.router import NoBackendAvailable, Router
+from llm_gateway.tracing import get_tracer
 
 logger = logging.getLogger(__name__)
 
@@ -177,7 +178,8 @@ class SemanticCache:
     async def _embed(self, text: str) -> list[float]:
         body = {"model": self.embed_model, "input": QUERY_PREFIX + text}
         start = time.perf_counter()
-        response, _ = await self.router.run(self.embed_model, lambda b: b.embeddings(body))
+        with get_tracer().start_as_current_span("semantic_cache.embed"):
+            response, _ = await self.router.run(self.embed_model, lambda b: b.embeddings(body))
         self.metrics.semantic_seconds.labels("embed").observe(time.perf_counter() - start)
         return response["data"][0]["embedding"]
 
@@ -189,11 +191,14 @@ class SemanticCache:
         messages.append({"role": "user", "content": f"Q1: {cached_query}\nQ2: {query}"})
         body = {"model": self.verify_model, "messages": messages, "temperature": 0, "max_tokens": 2}
         start = time.perf_counter()
-        response, _ = await self.router.run(self.verify_model, lambda b: b.chat(body))
+        with get_tracer().start_as_current_span("semantic_cache.verify") as span:
+            response, _ = await self.router.run(self.verify_model, lambda b: b.chat(body))
         self.metrics.semantic_seconds.labels("verify").observe(time.perf_counter() - start)
         choices = response.get("choices") or [{}]
         answer = (choices[0].get("message") or {}).get("content") or ""
-        return answer.strip().upper().startswith("YES")
+        verdict = answer.strip().upper().startswith("YES")
+        span.set_attribute("llmgw.semantic.verdict", verdict)
+        return verdict
 
     async def lookup(self, payload: dict[str, Any], namespace: str = "") -> SemanticLookup:
         split = split_request(payload, namespace)
@@ -203,7 +208,10 @@ class SemanticCache:
         try:
             result.vector = await self._embed(result.query)
             start = time.perf_counter()
-            found = await self.index.search(result.scope, result.vector)
+            with get_tracer().start_as_current_span("semantic_cache.search") as span:
+                found = await self.index.search(result.scope, result.vector)
+                if found:
+                    span.set_attribute("llmgw.semantic.similarity", found[0])
             self.metrics.semantic_seconds.labels("search").observe(time.perf_counter() - start)
             if found is None or found[0] < self.threshold:
                 result.outcome = "no_candidate"
