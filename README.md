@@ -303,6 +303,16 @@ The unit tests run the real `OpenAICompatibleBackend` against scripted HTTP resp
 (`httpx.MockTransport`) and an in-process Redis (`fakeredis`), so CI needs no GPU. The
 integration tests in `tests/integration/` hit the real stack.
 
+### Demo
+```bash
+make demo KEY=<gateway key>      # = python scripts/demo.py --api-key ... --markdown docs/demo.md
+```
+A scripted walkthrough of every feature against the live stack: health, a cache miss, an exact
+hit (1 ms), a reworded question served as a semantic hit (about 0.2 s), a near-miss that
+correctly gets a fresh answer, PII redaction, prompt-injection flags, streaming time to first
+token, the caller's ledger totals, a Jaeger trace link and a metrics excerpt.
+**[docs/demo.md](docs/demo.md)** is the real transcript of a run on the RTX 4050 laptop.
+
 ### Benchmarks
 ```bash
 make bench KEY=<gateway key>
@@ -471,7 +481,8 @@ Milestones follow [SHARED_STANDARDS.md](../SHARED_STANDARDS.md). Each one has a 
 - [x] README with measured results against the baseline (local, 20 W cap)
 - [x] Benchmark report (latency overhead, cache savings, failover) with raw data
 - [ ] Kaggle full-power numbers added
-- [ ] Demo recording or public deploy
+- [x] Scripted demo (`make demo`) with a real run transcript in [docs/demo.md](docs/demo.md)
+- [ ] Screen recording or public deploy (optional)
 
 ## Project Layout
 ```
@@ -495,6 +506,8 @@ Milestones follow [SHARED_STANDARDS.md](../SHARED_STANDARDS.md). Each one has a 
 ├── scripts/guardrail_bench.py  # guardrail latency by prompt size
 ├── scripts/semantic_threshold.py  # similarity distribution of labelled pairs
 ├── scripts/semantic_bench.py      # end-to-end semantic cache evaluation
+├── scripts/demo.py        # scripted walkthrough of every feature (make demo)
+├── scripts/k8s_secret.py  # Kubernetes Secret from .env (values never printed)
 ├── eval/                  # labelled prompt pairs (tuning + held-out)
 ├── notebooks/kaggle_benchmark.ipynb  # reproducible GPU benchmark on Kaggle
 ├── deploy/                # Prometheus config, Grafana provisioning + dashboard
