@@ -32,6 +32,7 @@ dev = [
     "ruff>=0.6",
     "pytest>=8.0",
     "fakeredis>=2.23",
+    "pyyaml>=6.0",
 ]
 
 [tool.hatch.build.targets.wheel]

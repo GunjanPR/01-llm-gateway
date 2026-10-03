@@ -13,3 +13,6 @@ scrape_configs:
     static_configs:
       - targets: ["host.docker.internal:8000"]
         labels: {deployment: host}
+
+rule_files:
+  - /etc/prometheus/alerts.yml
