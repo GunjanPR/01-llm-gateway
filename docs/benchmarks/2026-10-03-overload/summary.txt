@@ -1,8 +1,8 @@
-before-1node               ok=  36/600 goodput=  1.9/s p50= 1142ms p95= 1936ms first_err=ReadTimeout: 
-after-1node                ok= 191/600 goodput= 19.3/s p50= 1023ms p95= 1222ms first_err=HTTPStatusError: Server error '503 Servi
-before-2nodes              ok=  36/600 goodput=  1.8/s p50= 1174ms p95= 1971ms first_err=ReadTimeout: 
-after-2nodes               ok= 376/600 goodput= 38.6/s p50= 1037ms p95= 1224ms first_err=HTTPStatusError: Server error '503 Servi
-before-1node               ok=  36/600 goodput=  1.9/s p50= 1149ms p95= 1940ms first_err=ReadTimeout: 
-after-1node                ok= 192/600 goodput= 19.3/s p50= 1048ms p95= 1226ms first_err=HTTPStatusError: Server error '503 Servi
-before-2nodes              ok=  36/600 goodput=  1.8/s p50= 1178ms p95= 1972ms first_err=ReadTimeout: 
-after-2nodes               ok= 365/600 goodput= 38.5/s p50= 1031ms p95= 1218ms first_err=HTTPStatusError: Server error '503 Servi
+before-1node               ok=  36/600 goodput=  1.9/s p50= 1153ms p95= 1946ms first_err=ReadTimeout: 
+after-1node                ok= 191/600 goodput= 19.3/s p50= 1019ms p95= 1214ms first_err=HTTPStatusError: Server error '503 Servi
+before-2nodes              ok=  36/600 goodput=  1.8/s p50= 1145ms p95= 1956ms first_err=ReadTimeout: 
+after-2nodes               ok= 367/600 goodput= 38.6/s p50= 1025ms p95= 1220ms first_err=HTTPStatusError: Server error '503 Servi
+before-1node               ok=  36/600 goodput=  1.9/s p50= 1148ms p95= 1939ms first_err=ReadTimeout: 
+after-1node                ok= 188/600 goodput= 19.4/s p50=  827ms p95= 1232ms first_err=HTTPStatusError: Server error '503 Servi
+before-2nodes              ok=  36/600 goodput=  1.8/s p50= 1171ms p95= 1965ms first_err=ReadTimeout: 
+after-2nodes               ok= 359/600 goodput= 38.6/s p50= 1020ms p95= 1214ms first_err=HTTPStatusError: Server error '503 Servi

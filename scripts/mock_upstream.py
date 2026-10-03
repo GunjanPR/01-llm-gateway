@@ -29,17 +29,37 @@ ARGS = argparse.Namespace(delay_ms=0.0, jitter_ms=0.0, error_rate=0.0, tokens=8,
 _slots: asyncio.Semaphore | None = None
 
 
-async def _wait() -> None:
-    """Simulate generation; with --parallel N, like a GPU, only N requests run at once and
-    the rest queue (Ollama's OLLAMA_NUM_PARALLEL), so latency grows with load."""
-    delay = ARGS.delay_ms + random.uniform(0, ARGS.jitter_ms)
-    if not delay:
-        return
+async def _generate(delay: float) -> None:
     if _slots is None:
-        await asyncio.sleep(delay / 1000)
+        await asyncio.sleep(delay)
         return
     async with _slots:
-        await asyncio.sleep(delay / 1000)
+        await asyncio.sleep(delay)
+
+
+async def _disconnected(request: Request) -> None:
+    while (await request.receive())["type"] != "http.disconnect":
+        pass
+
+
+async def _wait(request: Request) -> bool:
+    """Simulate generation; False if the client disconnected first.
+
+    With --parallel N, like a GPU, only N requests run at once and the rest queue
+    (Ollama's OLLAMA_NUM_PARALLEL), so latency grows with load. Like Ollama, generation
+    stops when the client disconnects, freeing the slot.
+    """
+    delay = (ARGS.delay_ms + random.uniform(0, ARGS.jitter_ms)) / 1000
+    if not delay:
+        return True
+    work = asyncio.ensure_future(_generate(delay))
+    gone = asyncio.ensure_future(_disconnected(request))
+    await asyncio.wait({work, gone}, return_when=asyncio.FIRST_COMPLETED)
+    gone.cancel()
+    if work.done():
+        return True
+    work.cancel()
+    return False
 
 
 def _usage(completion: int) -> dict:
@@ -48,7 +68,8 @@ def _usage(completion: int) -> dict:
 
 async def chat(request: Request) -> Response:
     body = await request.json()
-    await _wait()
+    if not await _wait(request):
+        return Response(status_code=499)
     if random.random() < ARGS.error_rate:
         return JSONResponse({"error": {"message": "injected failure"}}, 500)
     model = body.get("model", "mock")
@@ -82,7 +103,8 @@ async def chat(request: Request) -> Response:
 
 async def embeddings(request: Request) -> Response:
     await request.json()
-    await _wait()
+    if not await _wait(request):
+        return Response(status_code=499)
     vector = [0.0] * 768
     return JSONResponse(
         {

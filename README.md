@@ -453,9 +453,9 @@ Each mock server does at most 20 req/s (4 parallel × 200 ms); 64 users, 600 req
 | | Succeeded | Goodput | p95 of successes |
 |---|---|---|---|
 | 1 server, before | 36 / 600 | 1.9 req/s | 1.94 s |
-| 1 server, with cap + cancellation | 191 / 600 | **19.3 req/s** (max 20) | 1.22 s |
+| 1 server, with cap + cancellation | 191 / 600 | **19.3 req/s** (max 20) | 1.21 s |
 | 2 servers, before | 36 / 600 | 1.8 req/s | 1.97 s |
-| 2 servers, with cap + spillover | 376 / 600 | **38.6 req/s** (max 40) | 1.22 s |
+| 2 servers, with cap + spillover | 367 / 600 | **38.6 req/s** (max 40) | 1.22 s |
 
 Before, timed-out requests kept generating and clogged the server queue, and the second
 server sat idle. After, everything admitted finishes within the deadline and the rest get
