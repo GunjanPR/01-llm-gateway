@@ -133,6 +133,7 @@ def settings() -> Settings:
         default_model="llama3.2",
         semantic_cache_enabled=False,  # enabled per test in test_semantic_cache.py
         warm_up_connections=False,  # scripted upstreams would see an extra GET /models
+        health_check_interval_seconds=0,  # no background probes either
     )
 
 

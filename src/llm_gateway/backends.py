@@ -69,7 +69,13 @@ class OpenAICompatibleBackend:
             raise BackendError(self.name, f"{type(exc).__name__}: {exc}") from exc
         if response.status_code >= 400:
             raise BackendError(self.name, _error_text(response), response.status_code)
-        return response.json()
+        try:
+            data = response.json()
+        except ValueError as exc:  # a proxy error page, a truncated body, ...
+            raise BackendError(self.name, f"invalid JSON from backend: {exc}", 502) from exc
+        if not isinstance(data, dict):
+            raise BackendError(self.name, "backend returned a non-object JSON body", 502)
+        return data
 
     async def chat(self, payload: dict[str, Any]) -> dict[str, Any]:
         return await self._post("/chat/completions", {**payload, "stream": False})

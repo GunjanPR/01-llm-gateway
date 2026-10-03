@@ -9,7 +9,8 @@ failure scenarios reproducible without a GPU.
     python scripts/bench.py --label mock --api-key $KEY --requests 2000 --concurrency 32 --no-cache
 
 Flags: --delay-ms (fixed latency per request), --jitter-ms (uniform extra latency),
---error-rate (fraction answered with HTTP 500), --tokens (streamed chunks per answer).
+--error-rate (fraction answered with HTTP 500), --tokens (streamed chunks per answer),
+--parallel (requests generated at once; the rest queue, like a GPU).
 """
 
 import argparse
@@ -24,12 +25,20 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
-ARGS = argparse.Namespace(delay_ms=0.0, jitter_ms=0.0, error_rate=0.0, tokens=8)
+ARGS = argparse.Namespace(delay_ms=0.0, jitter_ms=0.0, error_rate=0.0, tokens=8, parallel=0)
+_slots: asyncio.Semaphore | None = None
 
 
 async def _wait() -> None:
+    """Simulate generation; with --parallel N, like a GPU, only N requests run at once and
+    the rest queue (Ollama's OLLAMA_NUM_PARALLEL), so latency grows with load."""
     delay = ARGS.delay_ms + random.uniform(0, ARGS.jitter_ms)
-    if delay:
+    if not delay:
+        return
+    if _slots is None:
+        await asyncio.sleep(delay / 1000)
+        return
+    async with _slots:
         await asyncio.sleep(delay / 1000)
 
 
@@ -105,8 +114,11 @@ def main() -> None:
     parser.add_argument("--jitter-ms", type=float, default=0.0)
     parser.add_argument("--error-rate", type=float, default=0.0)
     parser.add_argument("--tokens", type=int, default=8)
+    parser.add_argument("--parallel", type=int, default=0, help="0 = unlimited")
     args = parser.parse_args()
     vars(ARGS).update(vars(args))
+    global _slots
+    _slots = asyncio.Semaphore(args.parallel) if args.parallel else None
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning", access_log=False)
 
 

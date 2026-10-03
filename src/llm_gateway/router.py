@@ -37,11 +37,23 @@ class NoBackendAvailable(Exception):
         self.errors = errors
 
 
+class Overloaded(Exception):
+    """Every backend for the model was at its concurrency limit for the whole queue wait."""
+
+    def __init__(self, model: str, waited: float) -> None:
+        super().__init__(
+            f"all backends for model '{model}' are at capacity (waited {waited:.1f} s)"
+        )
+        self.model = model
+        self.waited = waited
+
+
 @dataclass
 class BackendState:
     consecutive_failures: int = 0
     open_until: float = 0.0
     ewma_latency: float | None = None
+    inflight: int = 0
 
 
 class Router:
@@ -55,6 +67,9 @@ class Router:
         breaker_cooldown_seconds: float = 30.0,
         on_backend_error: Callable[[BackendError], None] | None = None,
         clock: Callable[[], float] = time.monotonic,
+        max_concurrency: int = 0,
+        queue_timeout_seconds: float = 30.0,
+        on_queue_wait: Callable[[float], None] | None = None,
     ) -> None:
         self.backends = backends
         self.policy = policy
@@ -65,9 +80,50 @@ class Router:
         self.on_backend_error = on_backend_error
         self.clock = clock
         self.state: dict[str, BackendState] = {b.name: BackendState() for b in backends}
+        # Per-backend cap on concurrent upstream calls (0 = no cap). A saturated backend is
+        # skipped in favour of the next candidate; when all are saturated, requests queue
+        # for up to queue_timeout_seconds and then fail fast with Overloaded (HTTP 503).
+        self.max_concurrency = max_concurrency
+        self.queue_timeout_seconds = queue_timeout_seconds
+        self.on_queue_wait = on_queue_wait
+        self._slot_freed: asyncio.Condition | None = None
 
     def is_available(self, backend: Backend) -> bool:
         return self.state[backend.name].open_until <= self.clock()
+
+    def is_saturated(self, backend: Backend) -> bool:
+        return 0 < self.max_concurrency <= self.state[backend.name].inflight
+
+    @property
+    def _cond(self) -> asyncio.Condition:
+        if self._slot_freed is None:  # created lazily, inside the running event loop
+            self._slot_freed = asyncio.Condition()
+        return self._slot_freed
+
+    def _acquire(self, backend: Backend) -> None:
+        self.state[backend.name].inflight += 1
+
+    async def _release(self, backend: Backend) -> None:
+        self.state[backend.name].inflight -= 1
+        if self.max_concurrency:
+            async with self._cond:
+                self._cond.notify_all()
+
+    async def _wait_for_slot(self, model: str, pending: list[Backend], since: float) -> None:
+        remaining = self.queue_timeout_seconds - (time.perf_counter() - since)
+        try:
+            if remaining <= 0:
+                raise TimeoutError
+            async with self._cond:
+                await asyncio.wait_for(
+                    self._cond.wait_for(lambda: any(not self.is_saturated(b) for b in pending)),
+                    remaining,
+                )
+        except TimeoutError:
+            waited = time.perf_counter() - since
+            if self.on_queue_wait:
+                self.on_queue_wait(waited)
+            raise Overloaded(model, waited) from None
 
     def _score(self, backend: Backend) -> float:
         cfg = backend.config
@@ -107,7 +163,19 @@ class Router:
             self.on_backend_error(error)
 
     async def _attempts(self, model: str) -> AsyncIterator[tuple[Backend, int]]:
-        for backend in self.candidates(model):
+        pending = self.candidates(model)
+        queued_since: float | None = None
+        while pending:
+            free = [b for b in pending if not self.is_saturated(b)]
+            if not free:
+                queued_since = queued_since or time.perf_counter()
+                await self._wait_for_slot(model, pending, queued_since)
+                continue
+            if queued_since is not None and self.on_queue_wait:
+                self.on_queue_wait(time.perf_counter() - queued_since)
+                queued_since = None
+            backend = free[0]
+            pending.remove(backend)
             for attempt in range(self.max_retries + 1):
                 if attempt:
                     await asyncio.sleep(self.retry_backoff_seconds * 2 ** (attempt - 1))
@@ -129,10 +197,12 @@ class Router:
                     "gen_ai.request.model": model,
                 },
             )
+            self._acquire(backend)
             try:
                 with use_span(span, end_on_exit=False):
                     result = await op(backend)
             except BackendError as exc:
+                await self._release(backend)
                 span.set_status(Status(StatusCode.ERROR, exc.kind))
                 span.end()
                 if exc.is_client_error:
@@ -142,6 +212,11 @@ class Router:
                 if not self.is_available(backend):
                     skip.add(backend.name)
                 continue
+            except BaseException:
+                await self._release(backend)
+                span.end()
+                raise
+            await self._release(backend)
             span.end()
             self.record_success(backend, time.perf_counter() - start)
             return result, backend
@@ -149,7 +224,7 @@ class Router:
 
     async def open_stream(
         self, model: str, payload: dict[str, Any]
-    ) -> tuple[Backend, AsyncIterator[str], float]:
+    ) -> tuple[Backend, AsyncGenerator[str, None], float]:
         """Start a stream, falling back until one backend yields its first chunk.
 
         Returns the backend, the full line iterator, and time-to-first-token (seconds).
@@ -171,6 +246,7 @@ class Router:
                 },
             )
             stream = backend.chat_stream(payload)
+            self._acquire(backend)
             try:
                 with use_span(span, end_on_exit=False):
                     first = await anext(stream)
@@ -178,14 +254,23 @@ class Router:
                 exc = BackendError(backend.name, "stream ended before any data", 502)
             except BackendError as err:
                 if err.is_client_error:
+                    await self._release(backend)
+                    await stream.aclose()
+                    span.end()
                     raise
                 exc = err
+            except BaseException:
+                await self._release(backend)
+                await stream.aclose()
+                span.end()
+                raise
             else:
                 ttft = time.perf_counter() - start
                 span.set_attribute("llmgw.ttft_ms", ttft * 1000)
                 span.end()
                 self.record_success(backend, ttft)
-                return backend, _prepend(first, stream), ttft
+                return backend, _prepend(first, stream, lambda b=backend: self._release(b)), ttft
+            await self._release(backend)
             span.set_status(Status(StatusCode.ERROR, exc.kind))
             span.end()
             await stream.aclose()
@@ -196,10 +281,18 @@ class Router:
         raise NoBackendAvailable(model, errors)
 
 
-async def _prepend(first: str, rest: AsyncGenerator[str, None]) -> AsyncIterator[str]:
+async def _prepend(
+    first: str,
+    rest: AsyncGenerator[str, None],
+    on_close: Callable[[], Awaitable[None]],
+) -> AsyncGenerator[str, None]:
+    """The stream with its first line put back; frees the backend slot when it ends."""
     try:
         yield first
         async for item in rest:
             yield item
     finally:
-        await rest.aclose()
+        try:
+            await rest.aclose()
+        finally:
+            await on_close()

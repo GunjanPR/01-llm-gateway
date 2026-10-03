@@ -84,6 +84,10 @@ class Settings(BaseSettings):
     gateway_port: int = 8000
     gateway_api_keys: str = ""
     log_level: str = "info"
+    # text = human-readable lines | json = one JSON object per line (for log shippers)
+    log_format: Literal["text", "json"] = "text"
+    # Reject request bodies larger than this with 413 (0 = no limit)
+    max_request_bytes: int = 4 * 1024 * 1024
 
     # Rewrite "localhost" to 127.0.0.1 in the URLs below (see ipv4_loopback)
     prefer_ipv4_loopback: bool = True
@@ -156,6 +160,16 @@ class Settings(BaseSettings):
     retry_backoff_seconds: float = 0.2
     circuit_breaker_failures: int = 3
     circuit_breaker_cooldown_seconds: float = 30.0
+    # Load shedding: at most this many concurrent calls per backend (0 = unlimited). When
+    # every backend for a model is full, requests wait up to BACKEND_QUEUE_TIMEOUT_SECONDS
+    # for a slot, then get 503 with Retry-After instead of piling up behind the GPU.
+    backend_max_concurrency: int = 64
+    backend_queue_timeout_seconds: float = 30.0
+    # Cancel the backend call when the client disconnects, freeing the GPU and the slot
+    cancel_on_disconnect: bool = True
+    # Probe every backend and Redis in the background (0 disables); feeds the
+    # llmgw_backend_reachable / llmgw_redis_up gauges so outages show without traffic
+    health_check_interval_seconds: float = 15.0
 
     @model_validator(mode="after")
     def _ipv4_loopback(self) -> "Settings":

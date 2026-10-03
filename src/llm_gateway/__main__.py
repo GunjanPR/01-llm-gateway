@@ -23,6 +23,7 @@ def main() -> None:
         reload=args.reload,
         workers=args.workers,
         log_level=settings.log_level,
+        access_log=False,  # the gateway writes its own access log (llm_gateway.access)
     )
 
 

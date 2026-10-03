@@ -28,11 +28,16 @@ class RateLimitResult:
 
 class RateLimiter:
     def __init__(
-        self, redis: Redis, limit_per_minute: int, clock: Callable[[], float] = time.time
+        self,
+        redis: Redis,
+        limit_per_minute: int,
+        clock: Callable[[], float] = time.time,
+        on_error: Callable[[str], None] | None = None,
     ) -> None:
         self.redis = redis
         self.limit = limit_per_minute
         self.clock = clock
+        self.on_error = on_error or (lambda op: None)
 
     async def hit(self, tenant: str) -> RateLimitResult:
         if self.limit <= 0:
@@ -46,7 +51,8 @@ class RateLimiter:
                 pipe.incr(key)
                 pipe.expire(key, WINDOW_SECONDS, nx=True)
                 count, _ = await pipe.execute()
-        except RedisError as exc:
+        except (RedisError, OSError) as exc:
+            self.on_error("rate_limit")
             logger.warning("rate limiter unavailable, allowing request: %s", exc)
             return RateLimitResult(True, self.limit, self.limit, reset)
         return RateLimitResult(count <= self.limit, self.limit, max(self.limit - count, 0), reset)

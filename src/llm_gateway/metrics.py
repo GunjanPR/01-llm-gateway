@@ -132,6 +132,53 @@ class GatewayMetrics:
             ["backend"],
             registry=r,
         )
+        self.backend_reachable = Gauge(
+            "llmgw_backend_reachable",
+            "1 if the last background health probe of the backend succeeded",
+            ["backend"],
+            registry=r,
+        )
+        self.backend_inflight = Gauge(
+            "llmgw_backend_inflight",
+            "Upstream calls currently running on the backend",
+            ["backend"],
+            registry=r,
+        )
+        self.redis_up = Gauge(
+            "llmgw_redis_up", "1 if the last background Redis ping succeeded", registry=r
+        )
+        self.redis_errors = Counter(
+            "llmgw_redis_errors_total",
+            "Redis failures the gateway absorbed (cache and rate limiter fail open)",
+            ["op"],
+            registry=r,
+        )
+        self.inflight = Gauge(
+            "llmgw_inflight_requests",
+            "HTTP requests the gateway is handling right now",
+            registry=r,
+        )
+        self.load_shed = Counter(
+            "llmgw_load_shed_total",
+            "Requests rejected with 503 because every backend was at its concurrency limit",
+            ["route"],
+            registry=r,
+        )
+        self.queue_wait = Histogram(
+            "llmgw_backend_queue_wait_seconds",
+            "Time requests waited for a free backend slot (only requests that waited)",
+            buckets=LATENCY_BUCKETS,
+            registry=r,
+        )
+        self.http_responses = Counter(
+            "llmgw_http_responses_total",
+            "Every HTTP response by route template and status class",
+            ["path", "status"],
+            registry=r,
+        )
+        self.build_info = Gauge(
+            "llmgw_build_info", "Gateway version (value is always 1)", ["version"], registry=r
+        )
 
 
 def usage_from(response: dict[str, Any]) -> tuple[int, int]:
