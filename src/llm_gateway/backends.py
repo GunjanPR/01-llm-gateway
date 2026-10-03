@@ -39,15 +39,20 @@ class OpenAICompatibleBackend:
         self.config = config
         self.name = config.name
         headers = {"Authorization": f"Bearer {config.api_key}"} if config.api_key else {}
+        limits = httpx.Limits(
+            max_connections=config.max_connections,
+            max_keepalive_connections=config.max_keepalive_connections,
+            keepalive_expiry=config.keepalive_seconds,
+        )
+        if transport is None and config.http_transport == "aiohttp":
+            from httpx_aiohttp import AiohttpTransport
+
+            transport = AiohttpTransport(limits=limits)
         self._client = httpx.AsyncClient(
             base_url=config.base_url,
             headers=headers,
             timeout=httpx.Timeout(config.timeout_seconds, connect=5.0),
-            limits=httpx.Limits(
-                max_connections=config.max_connections,
-                max_keepalive_connections=config.max_keepalive_connections,
-                keepalive_expiry=config.keepalive_seconds,
-            ),
+            limits=limits,
             transport=transport,
         )
 

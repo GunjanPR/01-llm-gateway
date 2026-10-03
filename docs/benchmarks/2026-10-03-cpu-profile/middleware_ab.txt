@@ -1,0 +1,8 @@
+base-miss n=3000 err=0 rps=224.1764 p50=111.5ms p99=539ms gw_cpu_per_req=3.84ms
+base-hit n=3000 err=0 rps=243.9579 p50=88.6ms p99=579.9ms gw_cpu_per_req=1.557ms
+asgi-miss n=3000 err=0 rps=247.3999 p50=94.6ms p99=521.9ms gw_cpu_per_req=3.12ms
+asgi-hit n=3000 err=0 rps=301.9403 p50=73.2ms p99=492.9ms gw_cpu_per_req=1.177ms
+base-miss n=3000 err=0 rps=239.4053 p50=112.2ms p99=382.3ms gw_cpu_per_req=4.123ms
+base-hit n=3000 err=0 rps=264.4243 p50=85.1ms p99=523.8ms gw_cpu_per_req=1.71ms
+asgi-miss n=3000 err=0 rps=235.4874 p50=99.5ms p99=527.7ms gw_cpu_per_req=3.387ms
+asgi-hit n=3000 err=0 rps=385.3709 p50=57.7ms p99=338.8ms gw_cpu_per_req=1.067ms

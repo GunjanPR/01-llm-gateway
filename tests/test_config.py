@@ -92,6 +92,10 @@ def test_backend_pool_settings_reach_the_http_client():
 
     settings = Settings(_env_file=None, backend_keepalive_seconds=90, backend_max_connections=7)
     config = settings.backend_configs()[0]
-    pool = OpenAICompatibleBackend(config)._client._transport._pool
-    assert pool._keepalive_expiry == 90
-    assert pool._max_connections == 7
+    assert config.http_transport == "aiohttp"
+    limits = OpenAICompatibleBackend(config)._client._transport.limits
+    assert limits.keepalive_expiry == 90 and limits.max_connections == 7
+
+    httpx_config = config.model_copy(update={"http_transport": "httpx"})
+    pool = OpenAICompatibleBackend(httpx_config)._client._transport._pool
+    assert pool._keepalive_expiry == 90 and pool._max_connections == 7

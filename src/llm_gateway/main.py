@@ -17,6 +17,8 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from opentelemetry import trace
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from redis.asyncio import Redis
+from starlette.datastructures import MutableHeaders
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from llm_gateway import __version__
 from llm_gateway.backends import BackendError, OpenAICompatibleBackend
@@ -55,6 +57,66 @@ class GatewayError(Exception):
         self.message = message
         self.error_type = error_type
         self.headers = headers or {}
+
+
+class RequestLogMiddleware:
+    """Tag every response with a request id (and trace id) and write its usage row.
+
+    Plain ASGI rather than `@app.middleware("http")`: Starlette's BaseHTTPMiddleware runs
+    each request through an extra task group and memory streams, which cost more CPU
+    per request than the rest of the gateway's own processing.
+    """
+
+    def __init__(self, app: ASGIApp, ledger: UsageLedger | None) -> None:
+        self.app = app
+        self.ledger = ledger
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        request_id = _client_request_id(scope) or uuid.uuid4()
+        state = scope.setdefault("state", {})
+        state["request_id"] = request_id
+        trace_id = current_trace_id()
+        start = time.perf_counter()
+        status = 500
+
+        async def send_with_ids(message: Message) -> None:
+            nonlocal status
+            if message["type"] == "http.response.start":
+                status = message["status"]
+                headers = MutableHeaders(scope=message)
+                headers["x-request-id"] = str(request_id)
+                if trace_id:
+                    headers["x-trace-id"] = trace_id
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_with_ids)
+        finally:
+            usage = state.get("usage")
+            if self.ledger and usage is not None and not usage.pop("deferred", False):
+                self.ledger.record(
+                    UsageEvent(
+                        id=request_id,
+                        status=status,
+                        latency_ms=(time.perf_counter() - start) * 1000,
+                        trace_id=trace_id,
+                        **usage,
+                    )
+                )
+
+
+def _client_request_id(scope: Scope) -> uuid.UUID | None:
+    """Reuse the caller's X-Request-ID when it is a UUID, so logs line up across services."""
+    for name, value in scope["headers"]:
+        if name == b"x-request-id":
+            try:
+                return uuid.UUID(value.decode("latin-1"))
+            except ValueError:
+                return None
+    return None
 
 
 def _error_body(message: str, error_type: str) -> dict[str, Any]:
@@ -170,28 +232,7 @@ def create_app(
     app.state.metrics = metrics
     app.state.ledger = ledger
 
-    @app.middleware("http")
-    async def request_log(request: Request, call_next):
-        """Tag every response with a request id and write its usage row."""
-        request.state.request_id = uuid.uuid4()
-        trace_id = current_trace_id()
-        start = time.perf_counter()
-        response = await call_next(request)
-        response.headers["x-request-id"] = str(request.state.request_id)
-        if trace_id:
-            response.headers["x-trace-id"] = trace_id
-        usage = getattr(request.state, "usage", None)
-        if ledger and usage is not None and not usage.pop("deferred", False):
-            ledger.record(
-                UsageEvent(
-                    id=request.state.request_id,
-                    status=response.status_code,
-                    latency_ms=(time.perf_counter() - start) * 1000,
-                    trace_id=trace_id,
-                    **usage,
-                )
-            )
-        return response
+    app.add_middleware(RequestLogMiddleware, ledger=ledger)
 
     @app.exception_handler(GatewayError)
     async def _gateway_error(_: Request, exc: GatewayError) -> JSONResponse:

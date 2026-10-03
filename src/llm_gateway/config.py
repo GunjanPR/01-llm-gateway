@@ -66,6 +66,7 @@ class BackendConfig(BaseModel):
     max_connections: int = 100
     max_keepalive_connections: int = 20
     keepalive_seconds: float = 60.0
+    http_transport: Literal["httpx", "aiohttp"] = "httpx"
 
     def serves(self, model: str) -> bool:
         return model in self.models or "*" in self.models
@@ -145,6 +146,10 @@ class Settings(BaseSettings):
     backend_max_connections: int = 100
     backend_max_keepalive_connections: int = 20
     backend_keepalive_seconds: float = 60.0
+    # aiohttp's connection pool and C parser cost about half the CPU per backend call of
+    # httpx's default transport (measured with scripts/mock_upstream.py); the httpx API
+    # on top stays the same either way.
+    backend_http_transport: Literal["httpx", "aiohttp"] = "aiohttp"
     # Connect to Redis and every backend at startup instead of on the first request
     warm_up_connections: bool = True
     backend_max_retries: int = 1
@@ -176,6 +181,7 @@ class Settings(BaseSettings):
             "max_connections": self.backend_max_connections,
             "max_keepalive_connections": self.backend_max_keepalive_connections,
             "keepalive_seconds": self.backend_keepalive_seconds,
+            "http_transport": self.backend_http_transport,
         }
         if self.vllm_base_url:
             backends.append(
