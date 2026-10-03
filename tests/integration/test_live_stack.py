@@ -5,8 +5,10 @@ Run with `make test-integration` after `make up` and `make run`. Configure with:
     GATEWAY_TEST_MODEL (default llama3.2), GATEWAY_TEST_EMBED_MODEL (default nomic-embed-text)
 """
 
+import asyncio
 import json
 import os
+import time
 import uuid
 
 import httpx
@@ -49,8 +51,6 @@ def test_health_sees_redis_and_a_backend(client):
 
 def test_identical_concurrent_requests_are_coalesced():
     """Two identical requests at once on a cold cache: one generation, shared."""
-    import asyncio
-
     body = chat(f"Reply with the single word OK. ({uuid.uuid4()})")
 
     async def both():
@@ -76,8 +76,6 @@ def test_client_disconnect_frees_the_backend():
             json=body,
             headers={"Authorization": f"Bearer {KEY}", "Cache-Control": "no-cache"},
         )
-    import time
-
     time.sleep(0.5)
     health = httpx.get(f"{URL}/health", timeout=10).json()
     assert all(b["inflight"] == 0 for b in health["backends"])
