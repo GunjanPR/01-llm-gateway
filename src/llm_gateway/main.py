@@ -274,6 +274,8 @@ def create_app(
         if writer
         else None
     )
+    # Cache keys being answered right now -> the leader's result, for request coalescing
+    in_flight: dict[str, asyncio.Future[dict[str, Any] | None]] = {}
     api_keys = settings.api_keys
     if not api_keys:
         logger.warning("GATEWAY_API_KEYS is empty: every /v1 request will be rejected")
@@ -584,38 +586,85 @@ def create_app(
                 span.set_attribute("llmgw.cache.hit", hit is not None)
         if hit:
             metrics.cache.labels("hit").inc()
-            metrics.requests.labels("chat", model, "cache_hit").inc()
-            metrics.saved_tokens.labels(model).inc(hit["prompt_tokens"] + hit["completion_tokens"])
-            metrics.saved_cost.labels(model).inc(hit["cost_usd"])
-            elapsed = time.perf_counter() - start
-            metrics.latency.labels("chat", model, hit["backend"], "hit").observe(elapsed)
-            usage.update(backend=hit["backend"], cache="HIT")
-            _annotate_span(usage)
-            return JSONResponse(
-                hit["response"],
-                headers=_headers(hit["backend"], "HIT", 0.0, elapsed, report),
-            )
+            return serve_stored(hit, "HIT", model, start, usage, report)
         if key:
             metrics.cache.labels("miss").inc()
+            leader = in_flight.get(key)
+            if leader is not None:
+                # An identical request is already being answered: share its result instead
+                # of generating the same answer twice (a cold-cache stampede).
+                await asyncio.wait({leader})
+                if not leader.cancelled() and leader.exception() is None and leader.result():
+                    metrics.cache.labels("coalesced").inc()
+                    return serve_stored(leader.result(), "COALESCED", model, start, usage, report)
+            # The leader failed or its client left: answer this one ourselves.
+        flight: asyncio.Future[dict[str, Any] | None] | None = None
+        if key and key not in in_flight:
+            flight = asyncio.get_running_loop().create_future()
+            in_flight[key] = flight
+        try:
+            response, entry = await answer(request, payload, model, key, namespace, start, report)
+        except BaseException as exc:
+            if flight and not flight.done():
+                if isinstance(exc, Exception):
+                    flight.set_exception(exc)
+                    flight.exception()  # mark retrieved; followers inspect it themselves
+                else:
+                    flight.cancel()
+            raise
+        else:
+            if flight and not flight.done():
+                flight.set_result(entry)
+        finally:
+            if flight and in_flight.get(key) is flight:
+                del in_flight[key]
+        return response
+
+    def serve_stored(
+        hit: dict[str, Any],
+        state: str,
+        model: str,
+        start: float,
+        usage: dict[str, Any],
+        report: GuardrailReport,
+        similarity: float | None = None,
+    ) -> JSONResponse:
+        """Answer from a stored entry (exact hit, semantic hit, or a coalesced request)."""
+        outcome = {"HIT": "cache_hit", "SEMANTIC_HIT": "semantic_hit"}.get(state, "coalesced")
+        metrics.requests.labels("chat", model, outcome).inc()
+        metrics.saved_tokens.labels(model).inc(hit["prompt_tokens"] + hit["completion_tokens"])
+        metrics.saved_cost.labels(model).inc(hit["cost_usd"])
+        elapsed = time.perf_counter() - start
+        label = {"HIT": "hit", "SEMANTIC_HIT": "semantic_hit"}.get(state, "coalesced")
+        metrics.latency.labels("chat", model, hit["backend"], label).observe(elapsed)
+        headers = _headers(hit["backend"], state, 0.0, elapsed, report)
+        if similarity is not None:
+            headers["x-gateway-similarity"] = f"{similarity:.4f}"
+        usage.update(backend=hit["backend"], cache=state)
+        _annotate_span(usage)
+        return JSONResponse(hit["response"], headers=headers)
+
+    async def answer(
+        request: Request,
+        payload: dict[str, Any],
+        model: str,
+        key: str | None,
+        namespace: str,
+        start: float,
+        report: GuardrailReport,
+    ) -> tuple[JSONResponse, dict[str, Any] | None]:
+        """A cache miss: try the semantic cache, then the backends. Returns the response
+        and the stored entry (shared with coalesced identical requests)."""
+        usage = request.state.usage
         lookup = SemanticLookup()
         if key and semantic:
             lookup = await semantic.lookup(payload, namespace)
             if lookup.entry:
                 hit = lookup.entry
-                metrics.requests.labels("chat", model, "semantic_hit").inc()
-                metrics.saved_tokens.labels(model).inc(
-                    hit["prompt_tokens"] + hit["completion_tokens"]
+                response = serve_stored(
+                    hit, "SEMANTIC_HIT", model, start, usage, report, lookup.similarity
                 )
-                metrics.saved_cost.labels(model).inc(hit["cost_usd"])
-                elapsed = time.perf_counter() - start
-                metrics.latency.labels("chat", model, hit["backend"], "semantic_hit").observe(
-                    elapsed
-                )
-                headers = _headers(hit["backend"], "SEMANTIC_HIT", 0.0, elapsed, report)
-                headers["x-gateway-similarity"] = f"{lookup.similarity:.4f}"
-                usage.update(backend=hit["backend"], cache="SEMANTIC_HIT")
-                _annotate_span(usage)
-                return JSONResponse(hit["response"], headers=headers)
+                return response, hit
 
         routed = time.perf_counter()
         try:
@@ -635,6 +684,7 @@ def create_app(
         cost = record_usage(model, backend, prompt, completion)
         if completion and upstream > 0:
             metrics.tokens_per_second.labels(model, backend.name).observe(completion / upstream)
+        entry = None
         if key:
             entry = {
                 "response": response,
@@ -660,9 +710,10 @@ def create_app(
             cost_usd=cost,
         )
         _annotate_span(usage)
-        return JSONResponse(
+        json_response = JSONResponse(
             response, headers=_headers(backend.name, cache_state, cost, elapsed, report)
         )
+        return json_response, entry
 
     async def stream_chat(
         request: Request, payload: dict[str, Any], model: str, report: GuardrailReport
