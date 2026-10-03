@@ -44,6 +44,43 @@ def test_health_sees_redis_and_a_backend(client):
     body = client.get("/health").json()
     assert body["redis"] is True
     assert any(b["reachable"] for b in body["backends"])
+    assert body["status"] in {"ok", "degraded"}
+
+
+def test_identical_concurrent_requests_are_coalesced():
+    """Two identical requests at once on a cold cache: one generation, shared."""
+    import asyncio
+
+    body = chat(f"Reply with the single word OK. ({uuid.uuid4()})")
+
+    async def both():
+        async with httpx.AsyncClient(
+            base_url=URL, headers={"Authorization": f"Bearer {KEY}"}, timeout=120
+        ) as c:
+            return await asyncio.gather(
+                *(c.post("/v1/chat/completions", json=body) for _ in range(2))
+            )
+
+    responses = asyncio.run(both())
+    assert [r.status_code for r in responses] == [200, 200]
+    assert sorted(r.headers["x-gateway-cache"] for r in responses) == ["COALESCED", "MISS"]
+    assert responses[0].json() == responses[1].json()
+
+
+def test_client_disconnect_frees_the_backend():
+    """A client that gives up must not leave its call running on the backend."""
+    body = chat(f"Write a long story about a lighthouse. ({uuid.uuid4()})", max_tokens=400)
+    with pytest.raises(httpx.ReadTimeout), httpx.Client(timeout=0.3) as quick:
+        quick.post(
+            f"{URL}/v1/chat/completions",
+            json=body,
+            headers={"Authorization": f"Bearer {KEY}", "Cache-Control": "no-cache"},
+        )
+    import time
+
+    time.sleep(0.5)
+    health = httpx.get(f"{URL}/health", timeout=10).json()
+    assert all(b["inflight"] == 0 for b in health["backends"])
 
 
 def test_real_completion_then_cache_hit(client):
