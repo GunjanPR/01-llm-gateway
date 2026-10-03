@@ -30,7 +30,7 @@ the [Healthcare RAG](../02-healthcare-rag/) project. Requests can go to local mo
 | Guardrails | PII redaction (email, phone, SSN, credit card with a Luhn check, IP address) on prompts and responses, and prompt-injection detection (5 rule families). Each can be off, flag/redact, or block; see [Guardrails](#guardrails) |
 | Resilience | If Redis goes down, cache and rate limiting are skipped (fail open) and counted in `llmgw_redis_errors_total`; corrupt cache entries are treated as misses. Oversized bodies get 413 (`MAX_REQUEST_BYTES`). An unexpected error returns an OpenAI-style 500 that names the request id. |
 | Health | `/health` probes Redis and every backend live and reports `ok` / `degraded` / `down`, with circuit state, in-flight calls, saturation and EWMA latency per backend. Background probes (`HEALTH_CHECK_INTERVAL_SECONDS`) log state changes and feed gauges, so an outage shows up with no traffic. `/livez` and `/readyz` are for Kubernetes. |
-| Logging | One access-log line per request: request id, status, latency, tenant, model, backend, cache result. `LOG_FORMAT=json` writes JSON lines that include the trace id. A caller's own `X-Request-ID` (a UUID) is reused, so logs line up across services. |
+| Logging | One access-log line per request: request id, status, latency, tenant, model, backend, cache result. `LOG_FORMAT=json` writes JSON lines that include the trace id. A caller's own `X-Request-ID` is logged as `client_request_id`, so logs line up across services. |
 | Metrics | Prometheus `/metrics`: requests by outcome (incl. `shed`, `cancelled`, `coalesced`), latency histograms, TTFT, tokens/s, tokens, spend, cache hits and savings, backend errors, breaker state, in-flight requests per backend, queue wait, load shedding, backend/Redis probe results, Redis errors, responses by route and status class |
 | Dashboards | A provisioned Grafana dashboard (24 panels), including per-request gateway overhead, semantic cache outcomes, guardrail events and a load/resilience row |
 | Alerts | 13 Prometheus alert rules ([deploy/prometheus/alerts.yml](deploy/prometheus/alerts.yml)): gateway down, backends unreachable, circuit open, Redis down, 5xx rate, backend errors, ledger drops, load shedding, queue wait, gateway overhead, streaming TTFT. Unit-tested with `promtool` in CI; a test fails if a panel or alert queries a metric the gateway doesn't export. |
@@ -506,7 +506,7 @@ Milestones follow [SHARED_STANDARDS.md](../SHARED_STANDARDS.md). Each one has a 
 
 ### M4: Evaluation & testing
 - [x] Unit tests for router, limiter, caches, config, guardrails and API (91 tests)
-- [x] Failure and load tests: load shedding, spillover, disconnect cancellation, coalescing, Redis outage, bad upstream replies, 300 overlapping requests, both HTTP transports over real sockets (137 tests total)
+- [x] Failure and load tests: load shedding, spillover, disconnect cancellation, coalescing, Redis outage, bad upstream replies, 300 overlapping requests, both HTTP transports over real sockets (145 tests total)
 - [x] Overload, coalescing and CPU-per-request benchmarks against a mock backend
 - [x] Integration tests against the real stack written (`tests/integration/`)
 - [x] Integration tests run green against real Ollama + Redis (8/8)

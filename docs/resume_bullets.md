@@ -19,7 +19,7 @@ from this repo; copy what you want from here.
   (README, failover).
 - Diagnosed a Windows `localhost` → IPv6 fallback that cost **~2 s per new connection**
   (2,052 ms vs 0.4 ms) and fixed it in config handling (README, Windows note).
-- Wrote 13 Prometheus alert rules unit-tested with promtool, and 137 unit tests including
+- Wrote 13 Prometheus alert rules unit-tested with promtool, and 145 unit tests including
   failure-injection and concurrency tests.
 
 Caveat to keep in mind in interviews: the CPU, overload and coalescing numbers use a mock
