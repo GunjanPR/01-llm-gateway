@@ -43,6 +43,11 @@ class OpenAICompatibleBackend:
             base_url=config.base_url,
             headers=headers,
             timeout=httpx.Timeout(config.timeout_seconds, connect=5.0),
+            limits=httpx.Limits(
+                max_connections=config.max_connections,
+                max_keepalive_connections=config.max_keepalive_connections,
+                keepalive_expiry=config.keepalive_seconds,
+            ),
             transport=transport,
         )
 

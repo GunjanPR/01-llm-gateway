@@ -43,10 +43,10 @@ logs:
 
 # Baseline (direct to Ollama) vs gateway, cache bypassed. Usage: make bench KEY=<gateway key>
 bench:
-	$(PYTHON) scripts/bench.py --label direct --base-url http://localhost:11434/v1 --requests 50 --concurrency 4
-	$(PYTHON) scripts/bench.py --label gateway --base-url http://localhost:8000/v1 --api-key $(KEY) --requests 50 --concurrency 4 --no-cache
-	$(PYTHON) scripts/bench.py --label gateway-cache --base-url http://localhost:8000/v1 --api-key $(KEY) --requests 50 --concurrency 4 --repeat-ratio 0.5
-	$(PYTHON) scripts/bench.py --label gateway-stream --base-url http://localhost:8000/v1 --api-key $(KEY) --requests 30 --concurrency 2 --stream --no-cache
+	$(PYTHON) scripts/bench.py --label direct --base-url http://127.0.0.1:11434/v1 --requests 50 --concurrency 4
+	$(PYTHON) scripts/bench.py --label gateway --base-url http://127.0.0.1:8000/v1 --api-key $(KEY) --requests 50 --concurrency 4 --no-cache
+	$(PYTHON) scripts/bench.py --label gateway-cache --base-url http://127.0.0.1:8000/v1 --api-key $(KEY) --requests 50 --concurrency 4 --repeat-ratio 0.5
+	$(PYTHON) scripts/bench.py --label gateway-stream --base-url http://127.0.0.1:8000/v1 --api-key $(KEY) --requests 30 --concurrency 2 --stream --no-cache
 
 # Scripted walkthrough of every feature against the running stack. Usage: make demo KEY=<gateway key>
 demo:

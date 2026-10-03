@@ -1,7 +1,7 @@
 """End-to-end tests against the real stack: a running gateway, Redis and Ollama.
 
 Run with `make test-integration` after `make up` and `make run`. Configure with:
-    GATEWAY_URL (default http://localhost:8000), GATEWAY_TEST_KEY (one of GATEWAY_API_KEYS),
+    GATEWAY_URL (default http://127.0.0.1:8000), GATEWAY_TEST_KEY (one of GATEWAY_API_KEYS),
     GATEWAY_TEST_MODEL (default llama3.2), GATEWAY_TEST_EMBED_MODEL (default nomic-embed-text)
 """
 
@@ -14,7 +14,7 @@ import pytest
 
 pytestmark = pytest.mark.integration
 
-URL = os.environ.get("GATEWAY_URL", "http://localhost:8000")
+URL = os.environ.get("GATEWAY_URL", "http://127.0.0.1:8000")
 KEY = os.environ.get("GATEWAY_TEST_KEY", "")
 MODEL = os.environ.get("GATEWAY_TEST_MODEL", "llama3.2")
 EMBED_MODEL = os.environ.get("GATEWAY_TEST_EMBED_MODEL", "nomic-embed-text")

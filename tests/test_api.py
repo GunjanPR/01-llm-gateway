@@ -209,3 +209,14 @@ def test_liveness_and_readiness(client_factory):
     client = client_factory([make_backend("a", Upstream(fail(500)))])
     assert client.get("/livez").json() == {"status": "ok"}
     assert client.get("/readyz").status_code == 200  # backends down doesn't matter
+
+
+def test_startup_warm_up_connects_to_backends(client_factory):
+    upstream = Upstream(ok())
+    client_factory([make_backend("a", upstream)], warm_up_connections=True)
+    assert [r["path"] for r in upstream.requests] == ["/v1/models"]
+
+
+def test_startup_warm_up_tolerates_a_dead_backend(client_factory):
+    client = client_factory([make_backend("a", Upstream(fail(503)))], warm_up_connections=True)
+    assert client.get("/livez").status_code == 200

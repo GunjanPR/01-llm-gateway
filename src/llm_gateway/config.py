@@ -1,14 +1,43 @@
 """Gateway settings, loaded from environment variables and `.env`."""
 
+import logging
 from functools import lru_cache
 from typing import Literal
+from urllib.parse import urlsplit, urlunsplit
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = logging.getLogger(__name__)
+
+# URL settings that may point at a service on this machine.
+LOOPBACK_URL_FIELDS = (
+    "redis_url",
+    "ollama_base_url",
+    "vllm_base_url",
+    "ledger_database_url",
+    "otel_exporter_otlp_endpoint",
+)
 
 
 def _split(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def ipv4_loopback(url: str) -> str:
+    """Replace a `localhost` host with 127.0.0.1, keeping scheme, credentials, port and path.
+
+    On Windows, "localhost" resolves to ::1 first. Ollama and many dev servers listen on
+    127.0.0.1 only, and Windows retries a refused TCP connect for about 2 seconds before
+    the client moves on to IPv4, so every new connection to "localhost" stalls.
+    """
+    parts = urlsplit(url)
+    if (parts.hostname or "").lower() != "localhost":
+        return url
+    userinfo, _, hostport = parts.netloc.rpartition("@")
+    hostport = "127.0.0.1" + hostport[len("localhost") :]
+    netloc = f"{userinfo}@{hostport}" if userinfo else hostport
+    return urlunsplit(parts._replace(netloc=netloc))
 
 
 def parse_models(value: str) -> dict[str, str]:
@@ -34,6 +63,9 @@ class BackendConfig(BaseModel):
     cost_per_1k_output: float = 0.0  # USD
     quality: float = 0.5  # 0-1, used by the "quality" routing policy
     timeout_seconds: float = 60.0
+    max_connections: int = 100
+    max_keepalive_connections: int = 20
+    keepalive_seconds: float = 60.0
 
     def serves(self, model: str) -> bool:
         return model in self.models or "*" in self.models
@@ -52,8 +84,11 @@ class Settings(BaseSettings):
     gateway_api_keys: str = ""
     log_level: str = "info"
 
+    # Rewrite "localhost" to 127.0.0.1 in the URLs below (see ipv4_loopback)
+    prefer_ipv4_loopback: bool = True
+
     # Redis: cache + rate limiting
-    redis_url: str = "redis://localhost:6379/0"
+    redis_url: str = "redis://127.0.0.1:6379/0"
     rate_limit_rpm: int = 60
     cache_mode: Literal["all", "deterministic", "off"] = "all"
     cache_ttl_seconds: int = 3600
@@ -61,7 +96,7 @@ class Settings(BaseSettings):
     cache_scope: Literal["tenant", "global"] = "tenant"
 
     # Ollama
-    ollama_base_url: str = "http://localhost:11434"
+    ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_models: str = "*"
     ollama_quality: float = 0.6
 
@@ -97,7 +132,7 @@ class Settings(BaseSettings):
     guardrail_output_pii: Literal["off", "redact"] = "redact"
     guardrail_injection: Literal["off", "flag", "block"] = "flag"
 
-    # Tracing (OTLP/HTTP, e.g. Jaeger at http://localhost:4318); blank disables
+    # Tracing (OTLP/HTTP, e.g. Jaeger at http://127.0.0.1:4318); blank disables
     otel_exporter_otlp_endpoint: str = ""
     otel_service_name: str = "llm-gateway"
 
@@ -105,10 +140,29 @@ class Settings(BaseSettings):
     default_model: str = "llama3.2"
     routing_policy: Literal["cost", "latency", "quality"] = "cost"
     backend_timeout_seconds: float = 60.0
+    # Connection pool per backend. httpx closes idle connections after 5 s by default, so a
+    # client pausing for a few seconds paid a fresh TCP connect on its next request.
+    backend_max_connections: int = 100
+    backend_max_keepalive_connections: int = 20
+    backend_keepalive_seconds: float = 60.0
+    # Connect to Redis and every backend at startup instead of on the first request
+    warm_up_connections: bool = True
     backend_max_retries: int = 1
     retry_backoff_seconds: float = 0.2
     circuit_breaker_failures: int = 3
     circuit_breaker_cooldown_seconds: float = 30.0
+
+    @model_validator(mode="after")
+    def _ipv4_loopback(self) -> "Settings":
+        if not self.prefer_ipv4_loopback:
+            return self
+        for field in LOOPBACK_URL_FIELDS:
+            urls = _split(getattr(self, field))
+            fixed = [ipv4_loopback(u) for u in urls]
+            if fixed != urls:
+                logger.info("%s: using 127.0.0.1 instead of localhost", field.upper())
+                setattr(self, field, ",".join(fixed))
+        return self
 
     @property
     def api_keys(self) -> set[str]:
@@ -117,6 +171,12 @@ class Settings(BaseSettings):
     def backend_configs(self) -> list[BackendConfig]:
         """Backends in priority order; the order breaks ties between equal policy scores."""
         backends: list[BackendConfig] = []
+        pool = {
+            "timeout_seconds": self.backend_timeout_seconds,
+            "max_connections": self.backend_max_connections,
+            "max_keepalive_connections": self.backend_max_keepalive_connections,
+            "keepalive_seconds": self.backend_keepalive_seconds,
+        }
         if self.vllm_base_url:
             backends.append(
                 BackendConfig(
@@ -125,7 +185,7 @@ class Settings(BaseSettings):
                     api_key=self.vllm_api_key,
                     models=parse_models(self.vllm_models),
                     quality=self.vllm_quality,
-                    timeout_seconds=self.backend_timeout_seconds,
+                    **pool,
                 )
             )
         # Several Ollama nodes may be listed, comma-separated: ollama, ollama-2, ...
@@ -136,7 +196,7 @@ class Settings(BaseSettings):
                     base_url=f"{url.rstrip('/').removesuffix('/v1')}/v1",
                     models=parse_models(self.ollama_models),
                     quality=self.ollama_quality,
-                    timeout_seconds=self.backend_timeout_seconds,
+                    **pool,
                 )
             )
         if self.hosted_base_url and self.hosted_api_key:
@@ -149,7 +209,7 @@ class Settings(BaseSettings):
                     cost_per_1k_input=self.hosted_cost_per_1k_input,
                     cost_per_1k_output=self.hosted_cost_per_1k_output,
                     quality=self.hosted_quality,
-                    timeout_seconds=self.backend_timeout_seconds,
+                    **pool,
                 )
             )
         return backends

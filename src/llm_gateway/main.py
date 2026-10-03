@@ -124,6 +124,26 @@ def create_app(
     if not api_keys:
         logger.warning("GATEWAY_API_KEYS is empty: every /v1 request will be rejected")
 
+    async def warm_up() -> None:
+        """Open the Redis and backend connections now, so the first request doesn't pay
+        for TCP setup. Failures are logged, not fatal: the gateway still starts."""
+
+        async def redis_ok() -> bool:
+            try:
+                return bool(await redis.ping())
+            except Exception:  # Redis down: cache and rate limiter fail open
+                return False
+
+        t0 = time.perf_counter()
+        redis_up, *reachable = await asyncio.gather(redis_ok(), *(b.health() for b in backends))
+        down = [b.name for b, up in zip(backends, reachable, strict=True) if not up]
+        logger.info(
+            "warm-up in %.0f ms: redis %s, backends down: %s",
+            (time.perf_counter() - t0) * 1000,
+            "up" if redis_up else "DOWN",
+            ", ".join(down) or "none",
+        )
+
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         if store:
@@ -133,6 +153,8 @@ def create_app(
                 logger.warning("usage ledger database unavailable at startup: %s", exc)
         if ledger:
             ledger.start()
+        if settings.warm_up_connections:
+            await warm_up()
         yield
         if ledger:
             await ledger.stop()

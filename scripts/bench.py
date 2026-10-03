@@ -2,19 +2,19 @@ r"""Load-test an OpenAI-compatible endpoint: the gateway, or a backend directly 
 
 Examples:
     # Through the gateway, cache bypassed: compare against the direct run for overhead
-    python scripts/bench.py --label gateway --base-url http://localhost:8000/v1 \
+    python scripts/bench.py --label gateway --base-url http://127.0.0.1:8000/v1 \
         --api-key $KEY --requests 100 --concurrency 4 --no-cache
 
     # Same workload straight to Ollama: the baseline
-    python scripts/bench.py --label direct --base-url http://localhost:11434/v1 \
+    python scripts/bench.py --label direct --base-url http://127.0.0.1:11434/v1 \
         --requests 100 --concurrency 4
 
     # Cache effect: 50% of requests repeat an earlier prompt
-    python scripts/bench.py --label cache --base-url http://localhost:8000/v1 \
+    python scripts/bench.py --label cache --base-url http://127.0.0.1:8000/v1 \
         --api-key $KEY --repeat-ratio 0.5
 
     # Streaming, to measure time-to-first-token
-    python scripts/bench.py --label stream --base-url http://localhost:8000/v1 \
+    python scripts/bench.py --label stream --base-url http://127.0.0.1:8000/v1 \
         --api-key $KEY --stream
 
 Results are printed and appended as JSON lines to results/bench.jsonl.
@@ -147,7 +147,7 @@ async def run(args) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--label", required=True, help="name for this run, e.g. gateway/direct")
-    parser.add_argument("--base-url", default="http://localhost:8000/v1")
+    parser.add_argument("--base-url", default="http://127.0.0.1:8000/v1")
     parser.add_argument("--api-key", default="")
     parser.add_argument("--model", default="llama3.2")
     parser.add_argument("--requests", type=int, default=50)
