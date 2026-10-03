@@ -109,3 +109,19 @@ async def test_hundreds_of_overlapping_requests_respect_the_cap(settings, redis)
     # Every reply belongs to its own request: no cross-talk under concurrency.
     for i, r in enumerate(responses):
         assert r.json()["choices"][0]["message"]["content"] == f"q{i}"
+
+
+async def test_followers_take_over_when_the_leader_fails(settings, redis):
+    upstream = SlowUpstream(delay=0.05, fail_first=1)
+    app = _app(settings, redis, upstream, backend_max_retries=0)
+    async with _client(app) as client:
+        responses = await asyncio.gather(
+            *(
+                client.post("/v1/chat/completions", json=_chat("same"), headers=AUTH)
+                for _ in range(10)
+            )
+        )
+    # one failed leader, one new leader, eight followers of the new leader
+    assert upstream.calls == 2
+    assert sorted(r.status_code for r in responses) == [200] * 9 + [502]
+    assert sum(r.headers.get("x-gateway-cache") == "COALESCED" for r in responses) == 8

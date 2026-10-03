@@ -57,6 +57,12 @@ def test_multiple_ollama_nodes():
         ("http://localhost.example.com:80", "http://localhost.example.com:80"),
         ("http://gpu-box:8001/v1", "http://gpu-box:8001/v1"),
         ("http://[::1]:11434", "http://[::1]:11434"),
+        ("https://localhost:8443/v1", "https://localhost:8443/v1"),  # TLS: cert names the host
+        ("rediss://localhost:6380/0", "rediss://localhost:6380/0"),
+        (
+            "postgresql://u@localhost/db?sslmode=verify-full",
+            "postgresql://u@localhost/db?sslmode=verify-full",
+        ),
     ],
 )
 def test_ipv4_loopback(url, expected):

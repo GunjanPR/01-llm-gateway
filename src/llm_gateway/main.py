@@ -44,6 +44,9 @@ logger = logging.getLogger("llm_gateway")
 T = TypeVar("T")
 # Not sent to anyone (the client is gone); used in logs, metrics and the usage ledger.
 CLIENT_CLOSED_STATUS = 499
+# Followers of a coalesced request wait through at most this many failed leaders before
+# calling the backend themselves.
+COALESCE_MAX_LEADERS = 3
 
 # Routes whose requests are written to the usage ledger, and their ledger names.
 LEDGER_ROUTES = {"/v1/chat/completions": "chat", "/v1/embeddings": "embeddings"}
@@ -81,9 +84,10 @@ class RequestLogMiddleware:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
-        request_id = _client_request_id(scope) or uuid.uuid4()
+        request_id = uuid.uuid4()
         state = scope.setdefault("state", {})
         state["request_id"] = request_id
+        state["client_request_id"] = _client_request_id(scope)
         trace_id = current_trace_id()
         start = time.perf_counter()
         status = 500
@@ -141,11 +145,13 @@ def _log_access(
         return
     fields = {
         "request_id": str(request_id),
+        "client_request_id": scope.get("state", {}).get("client_request_id"),
         "method": scope["method"],
         "path": scope["path"],
         "status": status,
         "latency_ms": round(elapsed_ms, 1),
     }
+    fields = {k: v for k, v in fields.items() if v is not None}
     if usage:
         for key in ("tenant", "model", "backend", "cache", "prompt_tokens", "completion_tokens"):
             if usage.get(key) is not None:
@@ -161,14 +167,16 @@ def _log_access(
     )
 
 
-def _client_request_id(scope: Scope) -> uuid.UUID | None:
-    """Reuse the caller's X-Request-ID when it is a UUID, so logs line up across services."""
+def _client_request_id(scope: Scope) -> str | None:
+    """The caller's own X-Request-ID, logged next to ours so logs line up across services.
+
+    Never used as the gateway's request id: that is the usage ledger's primary key, and a
+    client reusing an id (a retry) must not be able to collide with another row.
+    """
     for name, value in scope["headers"]:
         if name == b"x-request-id":
-            try:
-                return uuid.UUID(value.decode("latin-1"))
-            except ValueError:
-                return None
+            text = value.decode("latin-1")[:128]
+            return "".join(c for c in text if c.isalnum() or c in "-_.:") or None
     return None
 
 
@@ -193,6 +201,9 @@ async def until_disconnect(request: Request, work: Awaitable[T]) -> T:
     watcher = asyncio.ensure_future(_disconnected(request))
     try:
         await asyncio.wait({task, watcher}, return_when=asyncio.FIRST_COMPLETED)
+    except BaseException:  # we were cancelled ourselves (shutdown): don't orphan the work
+        task.cancel()
+        raise
     finally:
         watcher.cancel()
     if task.done():
@@ -410,9 +421,17 @@ def create_app(
         too_big = GatewayError(413, f"request body exceeds {limit} bytes", "invalid_request_error")
         if limit and declared.isdigit() and int(declared) > limit:
             raise too_big
-        body = await request.body()
-        if limit and len(body) > limit:
-            raise too_big
+        if limit:
+            chunks: list[bytes] = []
+            size = 0
+            async for chunk in request.stream():  # chunked bodies have no Content-Length
+                size += len(chunk)
+                if size > limit:
+                    raise too_big
+                chunks.append(chunk)
+            body = b"".join(chunks)
+        else:
+            body = await request.body()
         try:
             payload = json.loads(body)
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
@@ -587,21 +606,23 @@ def create_app(
         if hit:
             metrics.cache.labels("hit").inc()
             return serve_stored(hit, "HIT", model, start, usage, report)
+        flight: asyncio.Future[dict[str, Any] | None] | None = None
         if key:
             metrics.cache.labels("miss").inc()
-            leader = in_flight.get(key)
-            if leader is not None:
-                # An identical request is already being answered: share its result instead
-                # of generating the same answer twice (a cold-cache stampede).
+            # An identical request already being answered is shared instead of generated
+            # twice (a cold-cache stampede). If its leader fails or its client leaves, a
+            # waiting follower takes over as the new leader and the rest follow it.
+            for _ in range(COALESCE_MAX_LEADERS):
+                leader = in_flight.get(key)
+                if leader is None:
+                    break
                 await asyncio.wait({leader})
                 if not leader.cancelled() and leader.exception() is None and leader.result():
                     metrics.cache.labels("coalesced").inc()
                     return serve_stored(leader.result(), "COALESCED", model, start, usage, report)
-            # The leader failed or its client left: answer this one ourselves.
-        flight: asyncio.Future[dict[str, Any] | None] | None = None
-        if key and key not in in_flight:
-            flight = asyncio.get_running_loop().create_future()
-            in_flight[key] = flight
+            if key not in in_flight:
+                flight = asyncio.get_running_loop().create_future()
+                in_flight[key] = flight
         try:
             response, entry = await answer(request, payload, model, key, namespace, start, report)
         except BaseException as exc:
@@ -657,8 +678,12 @@ def create_app(
         and the stored entry (shared with coalesced identical requests)."""
         usage = request.state.usage
         lookup = SemanticLookup()
-        if key and semantic:
-            lookup = await semantic.lookup(payload, namespace)
+        if key and semantic and router.has_free_slot(settings.semantic_cache_embed_model):
+            # Optional work: skipped rather than queued when backends are saturated
+            try:
+                lookup = await upstream_call(request, semantic.lookup(payload, namespace))
+            except ClientDisconnected as exc:
+                raise upstream_failure("chat", model, exc) from exc
             if lookup.entry:
                 hit = lookup.entry
                 response = serve_stored(
@@ -770,7 +795,7 @@ def create_app(
                             model=model,
                             backend=backend.name,
                             cache="BYPASS",
-                            status=200 if outcome == "ok" else 502,
+                            status={"ok": 200, "cancelled": CLIENT_CLOSED_STATUS}.get(outcome, 502),
                             prompt_tokens=prompt,
                             completion_tokens=completion,
                             cost_usd=cost,

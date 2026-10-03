@@ -20,6 +20,9 @@ LOOPBACK_URL_FIELDS = (
 )
 
 
+TLS_SCHEMES = {"https", "rediss"}
+
+
 def _split(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
@@ -33,6 +36,9 @@ def ipv4_loopback(url: str) -> str:
     """
     parts = urlsplit(url)
     if (parts.hostname or "").lower() != "localhost":
+        return url
+    # TLS certificates name the host: rewriting would break hostname verification
+    if parts.scheme in TLS_SCHEMES or "sslmode=verify" in parts.query:
         return url
     userinfo, _, hostport = parts.netloc.rpartition("@")
     hostport = "127.0.0.1" + hostport[len("localhost") :]

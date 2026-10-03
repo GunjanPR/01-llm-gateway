@@ -225,13 +225,87 @@ def test_health_status_reflects_backends(client_factory):
     assert all_down.get("/health").json()["status"] == "down"
 
 
-def test_client_request_id_is_echoed_when_it_is_a_uuid(client_factory):
+def test_request_id_is_always_the_gateways_own(client_factory, caplog):
     client = client_factory([make_backend("a", Upstream(ok()))])
     rid = str(uuid.uuid4())
-    resp = client.get("/livez", headers={"X-Request-ID": rid})
-    assert resp.headers["x-request-id"] == rid
-    other = client.get("/livez", headers={"X-Request-ID": "not-a-uuid"})
-    assert other.headers["x-request-id"] != "not-a-uuid"
+    with caplog.at_level(logging.INFO, logger="llm_gateway.access"):
+        first = client.post(
+            "/v1/chat/completions", json=CHAT, headers={**AUTH, "X-Request-ID": rid}
+        )
+        second = client.post(
+            "/v1/chat/completions", json=CHAT, headers={**AUTH, "X-Request-ID": rid}
+        )
+    # The ledger keys rows by request id: a client reusing its id must not collide.
+    ids = {first.headers["x-request-id"], second.headers["x-request-id"], rid}
+    assert len(ids) == 3
+    records = [r for r in caplog.records if r.name == "llm_gateway.access"]
+    assert all(r.fields["client_request_id"] == rid for r in records)
+
+
+def test_chunked_body_over_the_limit_is_rejected_while_reading(client_factory):
+    upstream = Upstream(ok())
+    client = client_factory([make_backend("a", upstream)], max_request_bytes=1000)
+
+    def chunks():  # a generator body is sent chunked, with no Content-Length
+        yield b'{"model": "llama3.2", "messages": [{"role": "user", "content": "'
+        for _ in range(50):
+            yield b"x" * 100
+        yield b'"}]}'
+
+    resp = client.post("/v1/chat/completions", content=chunks(), headers=AUTH)
+    assert resp.status_code == 413 and not upstream.requests
+
+
+@pytest.mark.anyio
+async def test_healthy_but_full_backend_is_preferred_over_an_open_breaker():
+    healthy, broken = GatedBackend("healthy"), GatedBackend("broken")
+    router = Router([healthy, broken], max_concurrency=1, queue_timeout_seconds=2)
+    router.state["broken"].open_until = float("inf")  # breaker open
+    first = asyncio.create_task(router.run("m", lambda b: b.chat({})))
+    await _settle()
+    second = asyncio.create_task(router.run("m", lambda b: b.chat({})))
+    await _settle()
+    assert broken.calls == 0  # queued for the healthy backend, not sent to the broken one
+    healthy.gate.set()
+    assert (await second)[1].name == "healthy"
+    await first
+
+
+@pytest.mark.anyio
+async def test_retry_waits_for_a_slot_instead_of_exceeding_the_cap():
+    calls = {"n": 0}
+
+    class FlakyOnce(GatedBackend):
+        async def chat(self, payload):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                from llm_gateway.backends import BackendError
+
+                raise BackendError(self.name, "boom", 500)
+            self.active = getattr(self, "active", 0) + 1
+            self.peak = max(getattr(self, "peak", 0), self.active)
+            await self.gate.wait()
+            self.active -= 1
+            return {"ok": True}
+
+    a = FlakyOnce("a")
+    router = Router([a], max_concurrency=1, max_retries=1, retry_backoff_seconds=0.01)
+    retrying = asyncio.create_task(router.run("m", lambda b: b.chat({})))
+    await asyncio.sleep(0)  # first attempt fails, retry sleeps through the backoff
+    other = asyncio.create_task(router.run("m", lambda b: b.chat({})))
+    await asyncio.sleep(0.05)
+    assert router.state["a"].inflight <= 1
+    a.gate.set()
+    await asyncio.gather(retrying, other)
+    assert a.peak == 1
+
+
+def test_has_free_slot():
+    a = GatedBackend("a")
+    router = Router([a], max_concurrency=1)
+    assert router.has_free_slot("m")
+    router.state["a"].inflight = 1
+    assert not router.has_free_slot("m")
 
 
 def test_http_responses_counted_by_route_template(client_factory):

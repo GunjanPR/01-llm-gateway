@@ -162,23 +162,44 @@ class Router:
         if self.on_backend_error:
             self.on_backend_error(error)
 
+    def has_free_slot(self, model: str) -> bool:
+        """True if some healthy backend serving `model` can take a call right now."""
+        return any(not self.is_saturated(b) for b in self.candidates(model) if self.is_available(b))
+
+    def _pick(self, pending: list[Backend]) -> tuple[Backend | None, bool]:
+        """The best pending backend with a free slot, and whether to queue instead.
+
+        A backend with an open breaker is only tried when no healthy backend is left at
+        all; if healthy ones exist but are full, it is better to queue for them than to
+        send traffic to a backend known to be failing.
+        """
+        healthy = [b for b in pending if self.is_available(b)]
+        pool = healthy or pending
+        for backend in pool:
+            if not self.is_saturated(backend):
+                return backend, False
+        return None, True
+
     async def _attempts(self, model: str) -> AsyncIterator[tuple[Backend, int]]:
         pending = self.candidates(model)
         queued_since: float | None = None
         while pending:
-            free = [b for b in pending if not self.is_saturated(b)]
-            if not free:
+            backend, full = self._pick(pending)
+            if full:
                 queued_since = queued_since or time.perf_counter()
-                await self._wait_for_slot(model, pending, queued_since)
+                healthy = [b for b in pending if self.is_available(b)]
+                await self._wait_for_slot(model, healthy or pending, queued_since)
                 continue
+            assert backend is not None
             if queued_since is not None and self.on_queue_wait:
                 self.on_queue_wait(time.perf_counter() - queued_since)
                 queued_since = None
-            backend = free[0]
             pending.remove(backend)
             for attempt in range(self.max_retries + 1):
                 if attempt:
                     await asyncio.sleep(self.retry_backoff_seconds * 2 ** (attempt - 1))
+                    if self.is_saturated(backend):  # others took the slot during backoff
+                        await self._wait_for_slot(model, [backend], time.perf_counter())
                 yield backend, attempt
 
     async def run(self, model: str, op: Callable[[Backend], Awaitable[T]]) -> tuple[T, Backend]:
