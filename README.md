@@ -410,6 +410,14 @@ noise. Its own processing takes **under 0.5 ms for 95% of requests**. With half 
 repeated, the cache raised throughput by **74%**. Availability stayed at **100%** when a
 backend was killed under load.
 
+**Re-measured on this branch (2026-10-04,** [2026-10-03-overhead](docs/benchmarks/2026-10-03-overhead/)**):**
+same method and laptop on AC, with the localhost fix, aiohttp transport and ASGI
+middleware. 1-token overhead was **+1.8 ms at p50** (direct 40.8 ms, gateway 42.6 ms,
+median of 3×100). Streaming TTFT showed no measurable difference (55.0 vs 54.6 ms). The
+in-process histogram put all 306 requests at 1 ms or less and 97.7% at 0.5 ms or less,
+mean 0.34 ms (was 0.39 ms). Run-to-run spread on the direct baseline was about 5 ms
+(40.8 to 46.0 ms), so read +1.8 vs +4.2 ms as "about 2 to 4 ms", not a precise gain.
+
 ![Grafana dashboard during the benchmark and failover runs](docs/grafana-dashboard.png)
 
 *The dashboard during the runs above: load, cache and streaming runs, then the failover

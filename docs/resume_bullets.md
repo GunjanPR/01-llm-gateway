@@ -6,7 +6,8 @@ from this repo; copy what you want from here.
 - Built an OpenAI-compatible LLM gateway (FastAPI, Redis, PostgreSQL, Prometheus/Grafana,
   OpenTelemetry) in front of Ollama/vLLM with cost/latency/quality routing, retries,
   circuit breakers, exact and semantic caching, PII guardrails and a per-tenant usage
-  ledger; adds **+4.2 ms at p50** over calling Ollama directly (README, local results).
+  ledger; adds **+1.8 ms at p50** over calling Ollama directly on 1-token requests
+  (+4.2 ms before the optimization pass; README, local results).
 - Cut the gateway's CPU per uncached request by **60% (3.98 → 1.61 ms)** after profiling
   with py-spy: replaced Starlette's BaseHTTPMiddleware with plain ASGI middleware and
   moved backend calls to an aiohttp transport (docs/benchmarks/2026-10-03-cpu-profile).
