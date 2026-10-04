@@ -258,7 +258,9 @@ Every variable is documented in [.env.example](.env.example). The ones you'll mo
 > `127.0.0.1`, and each new HTTP client connection paid about +267 ms. The gateway
 > rewrites `localhost` to `127.0.0.1` in its backend, Redis, Postgres and OTLP URLs
 > (`PREFER_IPV4_LOOPBACK=true`, the default), keeps backend connections open for 60 s,
-> and opens them at startup.
+> and opens them at startup. End to end with `.env` still saying `localhost`, a 1-token
+> request after 7 s idle went from **590 ms to 344 ms** (direct to Ollama: 343 ms); see
+> [Results: localhost fix on the laptop](#results-localhost-fix-on-the-laptop-2026-10-04).
 
 ## How to Run
 
@@ -466,6 +468,26 @@ Cold-cache burst, 80% repeated prompts, 64 users, mock GPU with 8 slots × 500 m
 backend calls **186 → 86**, throughput **33 → 68 req/s**, p95 **4.0 → 2.0–2.4 s**. The
 median rose from 0.02 to about 0.5 s, because requests that used to be instant late cache
 hits now wait for an in-flight leader.
+
+### Results: localhost fix on the laptop (2026-10-04)
+
+RTX 4050 laptop on AC, real Ollama (`llama3.2`, 1-token answers, every prompt unique, cache
+bypassed), `.env` left at `OLLAMA_BASE_URL=http://localhost:11434`. Before is `main`,
+after is this branch, direct skips the gateway. Two rounds pooled, 0 errors
+([2026-10-03-localhost](docs/benchmarks/2026-10-03-localhost/)). Client-measured median
+(p95), ms:
+
+| Phase | Before | After | Direct to Ollama |
+|---|---|---|---|
+| First request after startup | 534 | **179** | 167 |
+| After 7 s idle (25 × 2) | 590 (605) | **344 (349)** | 343 (347) |
+| Back-to-back (50 × 2) | 44.4 (159) | **38.7 (155)** | 37.6 (153) |
+| 8 concurrent (40 × 2) | 270 (476) | **260 (290)** | 266 (273) |
+
+Before paid about 250 ms whenever it opened a backend connection, which is every request
+after more than 5 s idle (httpx's default keep-alive) and every new pooled connection
+under concurrency. After is within about 10 ms of calling Ollama directly. The 343 ms idle
+time for direct calls is Ollama waking the GPU, not the gateway.
 
 ### Results: Kaggle T4, full GPU power
 

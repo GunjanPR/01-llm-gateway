@@ -17,11 +17,13 @@ from this repo; copy what you want from here.
   throughput (**33 → 68 req/s**) on a cold-cache burst (docs/benchmarks/2026-10-03-coalescing).
 - Kept **100% availability (469/469 requests)** when a backend was killed under load
   (README, failover).
-- Diagnosed a Windows `localhost` → IPv6 fallback that cost **~2 s per new connection**
-  (2,052 ms vs 0.4 ms) and fixed it in config handling (README, Windows note).
+- Diagnosed a Windows `localhost` → IPv6 fallback that cost **~2 s per raw connection**
+  (2,052 ms vs 0.4 ms) and fixed it in config handling, cutting first-request latency
+  **534 → 179 ms** and post-idle latency **590 → 344 ms**, within 10 ms of calling the
+  model directly (docs/benchmarks/2026-10-03-localhost).
 - Wrote 13 Prometheus alert rules unit-tested with promtool, and 145 unit tests including
   failure-injection and concurrency tests.
 
 Caveat to keep in mind in interviews: the CPU, overload and coalescing numbers use a mock
-backend on a cloud VM to isolate the gateway; the overhead and failover numbers are on
+backend on a cloud VM to isolate the gateway; the overhead, failover and localhost numbers are on
 the RTX 4050 laptop with real Ollama.
