@@ -312,6 +312,7 @@ client.chat.completions.create(model="llama3.2", messages=[{"role": "user", "con
 ```bash
 make lint               # ruff check + ruff format --check
 make test               # unit tests (no GPU or services needed)
+make coverage           # the same with line coverage (91%; CI fails below 85%)
 make test-integration   # end-to-end against the running gateway + Redis + Ollama
                         #   needs GATEWAY_TEST_KEY=<one of GATEWAY_API_KEYS> in the environment
 ```
