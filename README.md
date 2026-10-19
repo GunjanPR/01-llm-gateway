@@ -585,9 +585,9 @@ Milestones follow [SHARED_STANDARDS.md](../SHARED_STANDARDS.md). Each one has a 
 - [x] Dockerfile and `docker-compose.yml` (gateway, Redis, Prometheus, Grafana; optional Ollama profile)
 - [x] `make up` verified locally (Redis, Prometheus scraping the gateway, Grafana dashboard provisioned)
 - [x] `make up-all` verified locally (gateway container → host Ollama, healthy, real completion)
-- [x] GitHub Actions: lint, test, image build and container smoke test
+- [x] GitHub Actions: lint, test, image build and container smoke test, and a kind cluster deploy probed through the Service
 - [x] Kubernetes manifests (Kustomize: gateway Deployment + HPA + PDB, Redis/Postgres StatefulSets, Jaeger), schema-validated in CI with kubeconform
-- [ ] Deployed and verified on a local cluster
+- [x] Deployed and verified on a local cluster (kind v0.24.0 on Docker Desktop, 2026-10-19): both gateway pods ready, a real completion from host Ollama through `svc/gateway`, and 677/677 `/readyz` calls through the Service succeeded during a rolling restart. The first deploy crash-looped: Kubernetes injected `GATEWAY_PORT=tcp://…` for the `gateway` Service, which the settings parser rejected. Fixed with `enableServiceLinks: false`; kubeconform could not catch it, so CI now deploys to kind too.
 
 ### M7: Docs, benchmarks & demo
 - [x] README with measured results against the baseline (local, 20 W cap)
