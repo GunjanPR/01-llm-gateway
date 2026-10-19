@@ -100,6 +100,8 @@ class RequestLogMiddleware:
                 headers["x-request-id"] = str(request_id)
                 if trace_id:
                     headers["x-trace-id"] = trace_id
+                for name, value in state.get("rate_limit_headers", {}).items():
+                    headers[name] = value
             await send(message)
 
         self.metrics.inflight.inc()
@@ -405,6 +407,7 @@ def create_app(
         if route:
             request.state.usage = {"tenant": tenant_id, "route": route, "model": "-"}
         result = await limiter.hit(tenant_id)
+        request.state.rate_limit_headers = result.headers()  # added by RequestLogMiddleware
         if not result.allowed:
             metrics.rate_limited.inc()
             raise GatewayError(

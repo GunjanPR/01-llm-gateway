@@ -18,7 +18,7 @@ the [Healthcare RAG](../02-healthcare-rag/) project. Requests can go to local mo
 |---|---|
 | OpenAI-compatible API | `POST /v1/chat/completions` (JSON + SSE streaming), `POST /v1/embeddings`, `GET /v1/models` |
 | Auth | Bearer API keys (`GATEWAY_API_KEYS`), constant-time comparison; with no keys configured, every request is rejected |
-| Per-tenant rate limiting | Fixed one-minute window per API key in Redis (`INCR` + `EXPIRE`), shared across replicas, with a `Retry-After` header |
+| Per-tenant rate limiting | Sliding-window counter per API key in Redis (two one-minute counters, weighted), shared across replicas. A fixed window let a client send 2× its limit across a window boundary; this caps any 60 s span at the limit (+1). Every response carries `x-ratelimit-limit`, `-remaining` and `-reset`; a 429 adds an exact `Retry-After` |
 | Routing policies | `cost` (cheapest $/1K tokens), `latency` (lowest observed EWMA latency), `quality` (highest configured score) |
 | Reliability | Retries with exponential backoff, fallback to the next backend, and a per-backend circuit breaker. Streams fall back only until the first token arrives. Bad requests (400/413/422) go straight back to the client, without retries. A backend that answers 200 with a non-JSON body (a proxy error page) counts as a failure and is failed over. |
 | Load shedding | A per-backend concurrency cap (`BACKEND_MAX_CONCURRENCY`). A full backend spills over to the next one; when all are full, requests queue up to `BACKEND_QUEUE_TIMEOUT_SECONDS`, then get a fast 503 with `Retry-After` instead of a timeout. If a client disconnects, its backend call is cancelled, so the GPU stops generating an answer nobody will read. At 3× overload this kept goodput at the server's maximum instead of collapsing to under 10% of it ([results](#results-gateway-efficiency-and-overload-2026-10-03)). |
@@ -496,6 +496,12 @@ that the one-shot redactor missed 68 of the 2,010 entities when a card or SSN sa
 another number (a Luhn-failed card candidate swallowed it); that is fixed for prompts and
 non-streaming answers too.
 
+**Rate limiting across window boundaries** (simulation with the real limiter on an
+in-memory Redis, limit 60/min, [tests/test_cache_ratelimit.py](tests/test_cache_ratelimit.py)):
+a client sending 120 requests at the end of one minute and 120 at the start of the next
+got **120** requests through in a 60 s span with the old fixed window, and **61** with the
+sliding-window counter. At a steady 4× the limit, both admit 60 per minute.
+
 ### Results: localhost fix on the laptop (2026-10-04)
 
 RTX 4050 laptop on AC, real Ollama (`llama3.2`, 1-token answers, every prompt unique, cache
@@ -547,7 +553,7 @@ Milestones follow [SHARED_STANDARDS.md](../SHARED_STANDARDS.md). Each one has a 
 - [x] Guardrails: PII redaction (input + output), prompt-injection detection; off/flag/redact/block modes
 
 ### M3: Data / storage layer
-- [x] Redis per-tenant rate limiting (fixed one-minute window)
+- [x] Redis per-tenant rate limiting (sliding-window counter, `x-ratelimit-*` headers)
 - [x] Exact-match response cache (Redis, TTL, modes)
 - [x] Semantic cache: embeddings + Redis vector search + LLM verifier, evaluated on tuning and held-out pairs
 - [x] Per-tenant cache isolation (`CACHE_SCOPE=tenant` default)
