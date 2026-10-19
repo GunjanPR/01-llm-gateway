@@ -23,6 +23,9 @@ spec:
         runAsUser: 10001
         seccompProfile: {type: RuntimeDefault}
       terminationGracePeriodSeconds: 30  # lets the ledger flush queued rows on shutdown
+      # Without this, Kubernetes injects GATEWAY_PORT=tcp://<ip>:8000 for the Service named
+      # `gateway`, which clashes with the app's GATEWAY_PORT setting and crashes the pod.
+      enableServiceLinks: false
       containers:
         - name: gateway
           image: llm-gateway:local

@@ -16,8 +16,10 @@ can use the GPU directly, and pods reach it at `host.docker.internal:11434`.
 
 ## Deploy
 
-Prerequisites: Docker Desktop with Kubernetes enabled (Settings → Kubernetes → Enable
-Kubernetes, Kubeadm), and Ollama running on the host.
+Prerequisites: a local cluster, either Docker Desktop's (Settings → Kubernetes → Enable
+Kubernetes, Kubeadm) or kind (`kind create cluster --name llmgw`, then
+`kind load docker-image llm-gateway:local --name llmgw` after the build below), and Ollama
+running on the host.
 
 ```bash
 docker build -t llm-gateway:local .                 # the cluster uses the local image
@@ -33,3 +35,17 @@ On Windows, if `kubectl` isn't on your PATH, use
 
 To tear it down: `kubectl delete -k k8s/`. This keeps the PersistentVolumeClaims; to remove
 the data too, delete them with `kubectl -n llm-gateway delete pvc --all`.
+
+## Verified (kind v0.24.0 on Docker Desktop, 2026-10-19)
+
+- Both gateway pods became ready; `/livez` and `/readyz` returned `ok` through the Service.
+- A chat completion through `svc/gateway` was served by Ollama on the host
+  (`x-gateway-backend: ollama`), with `x-ratelimit-*` headers from the shared Redis.
+- During `kubectl rollout restart deploy/gateway`, a pod in the cluster called
+  `http://gateway:8000/readyz` every 0.1 s for 75 s: 677 of 677 calls succeeded.
+
+The first deploy crash-looped. Kubernetes adds Docker-link style variables for every Service
+in the namespace, so the `gateway` Service produced `GATEWAY_PORT=tcp://10.96.x.x:8000`, which
+the gateway's `GATEWAY_PORT` setting could not parse. The pod spec now sets
+`enableServiceLinks: false`. Schema validation passes either way, so CI also deploys the
+manifests to a kind cluster (`k8s-deploy` job).
