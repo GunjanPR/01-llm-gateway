@@ -149,3 +149,17 @@ def test_api_guardrails_off(client_factory):
     assert upstream.requests[0]["body"]["messages"][0]["content"].startswith("me@me.com")
     assert resp.json()["choices"][0]["message"]["content"] == "x@y.com"
     assert "x-gateway-guardrails" not in resp.headers
+
+
+@pytest.mark.parametrize(
+    ("text", "kind"),
+    [
+        ("enrolled in 2019 4111 1111 1111 1111 on file", "CREDIT_CARD"),  # number before
+        ("card 5500-0000-0000-0004 3 times", "CREDIT_CARD"),  # number after
+        ("cohort 412 123-45-6789 enrolled", "SSN"),  # inside a failed card candidate
+    ],
+)
+def test_pii_next_to_other_numbers_is_still_found(text, kind):
+    """A digit run that fails the Luhn check must not hide a real entity inside it."""
+    clean, found = redact_pii(text)
+    assert found[kind] == 1, clean

@@ -25,7 +25,7 @@ from llm_gateway import __version__
 from llm_gateway.backends import BackendError, OpenAICompatibleBackend
 from llm_gateway.cache import ResponseCache, cache_key, is_cacheable
 from llm_gateway.config import Settings, get_settings
-from llm_gateway.guardrails import GuardrailReport, redact_response, scan_messages
+from llm_gateway.guardrails import GuardrailReport, StreamGuard, redact_response, scan_messages
 from llm_gateway.ledger import PostgresStore, UsageEvent, UsageLedger, Writer
 from llm_gateway.logs import configure_logging
 from llm_gateway.metrics import (
@@ -756,6 +756,8 @@ def create_app(
         row["deferred"] = True
         row["trace_id"] = current_trace_id()
 
+        redactor = StreamGuard() if settings.guardrail_output_pii == "redact" else None
+
         async def body() -> AsyncIterator[bytes]:
             text: list[str] = []
             usage: dict[str, Any] = {}
@@ -763,7 +765,11 @@ def create_app(
             try:
                 async for line in lines:
                     data = line.removeprefix("data:").strip()
-                    if data and data != "[DONE]":
+                    if data == "[DONE]" and redactor:
+                        tail = redactor.flush_chunk()
+                        if tail:
+                            yield tail
+                    elif data:
                         try:
                             chunk = json.loads(data)
                         except json.JSONDecodeError:
@@ -771,7 +777,13 @@ def create_app(
                         usage = chunk.get("usage") or usage
                         for choice in chunk.get("choices") or []:
                             text.append((choice.get("delta") or {}).get("content") or "")
+                        if redactor and chunk:
+                            line = redactor.rewrite(chunk)
                     yield f"{line}\n\n".encode()
+                if redactor:  # the upstream ended without [DONE]
+                    tail = redactor.flush_chunk()
+                    if tail:
+                        yield tail
             except BackendError as exc:
                 outcome = "error"
                 metrics.backend_errors.labels(exc.backend, exc.kind).inc()
@@ -786,6 +798,14 @@ def create_app(
                 prompt = int(usage.get("prompt_tokens") or estimate_tokens(prompt_text(payload)))
                 completion = int(usage.get("completion_tokens") or estimate_tokens("".join(text)))
                 cost = record_usage(model, backend, prompt, completion)
+                if redactor:
+                    metrics.guardrail_seconds.labels("output").observe(redactor.seconds)
+                    for kind, n in redactor.found.items():
+                        metrics.guardrail_events.labels(
+                            "output", f"pii_{kind.lower()}", "redact"
+                        ).inc(n)
+                        report.pii[f"OUT_{kind}"] += n
+                    row["guardrails"] = report.header or None
                 if ledger:
                     ledger.record(
                         UsageEvent(

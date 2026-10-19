@@ -1,0 +1,6 @@
+off n=1000 err=0 cpu_ms_per_req=5.64
+redact n=1000 err=0 cpu_ms_per_req=8.0
+off n=1000 err=0 cpu_ms_per_req=5.55
+redact n=1000 err=0 cpu_ms_per_req=8.56
+off n=1000 err=0 cpu_ms_per_req=6.67
+redact n=1000 err=0 cpu_ms_per_req=8.08
