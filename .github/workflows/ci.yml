@@ -16,7 +16,7 @@ jobs:
           cache: pip
       - run: make install
       - run: make lint
-      - run: make test
+      - run: make coverage
 
   docker:
     runs-on: ubuntu-latest

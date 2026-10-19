@@ -2,7 +2,7 @@
 PYTHON ?= python
 KEY ?=
 
-.PHONY: install lint format test test-integration run up up-all down logs bench demo
+.PHONY: install lint format test coverage test-integration run up up-all down logs bench demo
 
 install:
 	$(PYTHON) -m pip install --upgrade pip
@@ -18,6 +18,10 @@ format:
 
 test:
 	$(PYTHON) -m pytest
+
+# Unit tests with line coverage; CI fails below the floor
+coverage:
+	$(PYTHON) -m pytest --cov=llm_gateway --cov-report=term-missing:skip-covered --cov-fail-under=85
 
 # Needs the stack running (make up + make run) and GATEWAY_TEST_KEY set
 test-integration:

@@ -18,7 +18,7 @@ the [Healthcare RAG](../02-healthcare-rag/) project. Requests can go to local mo
 |---|---|
 | OpenAI-compatible API | `POST /v1/chat/completions` (JSON + SSE streaming), `POST /v1/embeddings`, `GET /v1/models` |
 | Auth | Bearer API keys (`GATEWAY_API_KEYS`), constant-time comparison; with no keys configured, every request is rejected |
-| Per-tenant rate limiting | Fixed one-minute window per API key in Redis (`INCR` + `EXPIRE`), shared across replicas, with a `Retry-After` header |
+| Per-tenant rate limiting | Sliding-window counter per API key in Redis (two one-minute counters, weighted), shared across replicas. A fixed window let a client send 2× its limit across a window boundary; this caps any 60 s span at the limit (+1). Every response carries `x-ratelimit-limit`, `-remaining` and `-reset`; a 429 adds an exact `Retry-After` |
 | Routing policies | `cost` (cheapest $/1K tokens), `latency` (lowest observed EWMA latency), `quality` (highest configured score) |
 | Reliability | Retries with exponential backoff, fallback to the next backend, and a per-backend circuit breaker. Streams fall back only until the first token arrives. Bad requests (400/413/422) go straight back to the client, without retries. A backend that answers 200 with a non-JSON body (a proxy error page) counts as a failure and is failed over. |
 | Load shedding | A per-backend concurrency cap (`BACKEND_MAX_CONCURRENCY`). A full backend spills over to the next one; when all are full, requests queue up to `BACKEND_QUEUE_TIMEOUT_SECONDS`, then get a fast 503 with `Retry-After` instead of a timeout. If a client disconnects, its backend call is cancelled, so the GPU stops generating an answer nobody will read. At 3× overload this kept goodput at the server's maximum instead of collapsing to under 10% of it ([results](#results-gateway-efficiency-and-overload-2026-10-03)). |
@@ -27,7 +27,7 @@ the [Healthcare RAG](../02-healthcare-rag/) project. Requests can go to local mo
 | Semantic cache | Reuses an answer when a new prompt *means* the same as a cached one: `nomic-embed-text` embeddings, Redis 8 vector search (HNSW, cosine), then an LLM verifier. 27/27 paraphrases hit with 0/34 false hits on the tuning set; 8/10 hits with 0/10 false hits on a held-out set. See [Semantic cache](#semantic-cache). |
 | Cost tracking | Token usage from the backend, or estimated if the backend doesn't report it, times $/1K pricing per backend. The cost of each request goes in the `x-gateway-cost-usd` header. |
 | Usage ledger | One PostgreSQL row per request: tenant, model, backend, cache result, status, tokens, cost, latency and guardrail findings, including rejected and failed requests. Writes are batched in the background, so they never slow a response. `GET /v1/usage` returns the caller's own totals per model. Every response has an `x-request-id` that matches its row. |
-| Guardrails | PII redaction (email, phone, SSN, credit card with a Luhn check, IP address) on prompts and responses, and prompt-injection detection (5 rule families). Each can be off, flag/redact, or block; see [Guardrails](#guardrails) |
+| Guardrails | PII redaction (email, phone, SSN, credit card with a Luhn check, IP address) on prompts and responses, including streamed responses where an entity is split across chunks, and prompt-injection detection (5 rule families). Each can be off, flag/redact, or block; see [Guardrails](#guardrails) |
 | Resilience | If Redis goes down, cache and rate limiting are skipped (fail open) and counted in `llmgw_redis_errors_total`; corrupt cache entries are treated as misses. Oversized bodies get 413 (`MAX_REQUEST_BYTES`). An unexpected error returns an OpenAI-style 500 that names the request id. |
 | Health | `/health` probes Redis and every backend live and reports `ok` / `degraded` / `down`, with circuit state, in-flight calls, saturation and EWMA latency per backend. Background probes (`HEALTH_CHECK_INTERVAL_SECONDS`) log state changes and feed gauges, so an outage shows up with no traffic. `/livez` and `/readyz` are for Kubernetes. |
 | Logging | One access-log line per request: request id, status, latency, tenant, model, backend, cache result. `LOG_FORMAT=json` writes JSON lines that include the trace id. A caller's own `X-Request-ID` is logged as `client_request_id`, so logs line up across services. |
@@ -154,7 +154,7 @@ model round trip.
 | Setting | Values (default **bold**) | Effect |
 |---|---|---|
 | `GUARDRAIL_PII` | off, **redact**, block | Replaces PII in every message with `[REDACTED_<KIND>]` before routing, caching and logging. `block` rejects the request with 400 `guardrail_violation` instead. |
-| `GUARDRAIL_OUTPUT_PII` | off, **redact** | Redacts PII in non-streaming model answers. Streaming answers are not redacted, because an entity can be split across chunks. |
+| `GUARDRAIL_OUTPUT_PII` | off, **redact** | Redacts PII in model answers, streamed or not. In a stream, an email or phone number usually arrives in several chunks, so the gateway holds back only the trailing word (and a trailing run of digits) that a later chunk could still complete, and sends the rest redacted. Text runs about one token behind the model; see [stream redaction](docs/benchmarks/2026-10-19-stream-redaction/). |
 | `GUARDRAIL_INJECTION` | off, **flag**, block | Checks user and tool messages (not the system prompt) against 5 rule families: ignore-instructions, reveal-system-prompt, role override, jailbreak keywords, chat-template delimiters. `flag` adds a header and a metric; `block` returns 400. |
 
 Every event is counted in `llmgw_guardrail_events_total{direction,kind,action}`, and the time
@@ -312,6 +312,7 @@ client.chat.completions.create(model="llama3.2", messages=[{"role": "user", "con
 ```bash
 make lint               # ruff check + ruff format --check
 make test               # unit tests (no GPU or services needed)
+make coverage           # the same with line coverage (91%; CI fails below 85%)
 make test-integration   # end-to-end against the running gateway + Redis + Ollama
                         #   needs GATEWAY_TEST_KEY=<one of GATEWAY_API_KEYS> in the environment
 ```
@@ -477,6 +478,31 @@ backend calls **186 → 86**, throughput **33 → 68 req/s**, p95 **4.0 → 2.0�
 median rose from 0.02 to about 0.5 s, because requests that used to be instant late cache
 hits now wait for an in-flight leader.
 
+### Results: PII redaction on streamed answers (2026-10-19)
+
+Streams used to skip output redaction. On 500 synthetic answers with 2,010 PII entities
+cut into LLM-sized chunks ([2026-10-19-stream-redaction](docs/benchmarks/2026-10-19-stream-redaction/),
+`python scripts/stream_guard_bench.py`):
+
+| | Entities that reached the client |
+|---|---|
+| Streaming before (no redaction) | 2,010 / 2,010 |
+| Redacting each chunk on its own | 2,010 / 2,010 |
+| **Chunk-safe redactor (now)** | **0 / 2,010** |
+
+Visible text lags the model by a median of 4 characters (p95: 13). Gateway CPU rises by
+about 11 µs per chunk (5.95 → 8.21 ms per 200-chunk stream against a 0 ms mock backend),
+about 0.03% of a stream at the laptop's measured 26.5 tokens/s. The same benchmark found
+that the one-shot redactor missed 68 of the 2,010 entities when a card or SSN sat next to
+another number (a Luhn-failed card candidate swallowed it); that is fixed for prompts and
+non-streaming answers too.
+
+**Rate limiting across window boundaries** (simulation with the real limiter on an
+in-memory Redis, limit 60/min, [tests/test_cache_ratelimit.py](tests/test_cache_ratelimit.py)):
+a client sending 120 requests at the end of one minute and 120 at the start of the next
+got **120** requests through in a 60 s span with the old fixed window, and **61** with the
+sliding-window counter. At a steady 4× the limit, both admit 60 per minute.
+
 ### Results: localhost fix on the laptop (2026-10-04)
 
 RTX 4050 laptop on AC, real Ollama (`llama3.2`, 1-token answers, every prompt unique, cache
@@ -528,7 +554,7 @@ Milestones follow [SHARED_STANDARDS.md](../SHARED_STANDARDS.md). Each one has a 
 - [x] Guardrails: PII redaction (input + output), prompt-injection detection; off/flag/redact/block modes
 
 ### M3: Data / storage layer
-- [x] Redis per-tenant rate limiting (fixed one-minute window)
+- [x] Redis per-tenant rate limiting (sliding-window counter, `x-ratelimit-*` headers)
 - [x] Exact-match response cache (Redis, TTL, modes)
 - [x] Semantic cache: embeddings + Redis vector search + LLM verifier, evaluated on tuning and held-out pairs
 - [x] Per-tenant cache isolation (`CACHE_SCOPE=tenant` default)
@@ -536,7 +562,8 @@ Milestones follow [SHARED_STANDARDS.md](../SHARED_STANDARDS.md). Each one has a 
 
 ### M4: Evaluation & testing
 - [x] Unit tests for router, limiter, caches, config, guardrails and API (91 tests)
-- [x] Failure and load tests: load shedding, spillover, disconnect cancellation, coalescing, Redis outage, bad upstream replies, 300 overlapping requests, both HTTP transports over real sockets (145 tests total)
+- [x] Failure and load tests: load shedding, spillover, disconnect cancellation, coalescing, Redis outage, bad upstream replies, 300 overlapping requests, both HTTP transports over real sockets
+- [x] Streaming PII redaction, with a property test that any chunking gives the same output as redacting the whole answer (159 tests total)
 - [x] Overload, coalescing and CPU-per-request benchmarks against a mock backend
 - [x] Integration tests against the real stack written (`tests/integration/`)
 - [x] Integration tests run green against real Ollama + Redis (8/8)

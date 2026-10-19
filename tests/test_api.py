@@ -109,6 +109,8 @@ def test_rate_limit(client_factory):
     responses = [client.post("/v1/chat/completions", json=CHAT, headers=AUTH) for _ in range(3)]
     assert [r.status_code for r in responses] == [200, 200, 429]
     assert "Retry-After" in responses[-1].headers
+    assert [r.headers["x-ratelimit-remaining"] for r in responses] == ["1", "0", "0"]
+    assert responses[0].headers["x-ratelimit-limit"] == "2"
 
 
 def test_streaming(client_factory):

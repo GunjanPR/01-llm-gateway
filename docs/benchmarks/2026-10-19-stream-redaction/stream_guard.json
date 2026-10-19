@@ -1,0 +1,14 @@
+{
+  "date": "2026-10-19T14:38:35+00:00",
+  "machine": "x86_64 / Python 3.11.17",
+  "answers": 500,
+  "chunks": 131379,
+  "entities": 2010,
+  "leaked_no_redaction": 2010,
+  "leaked_naive_per_chunk": 2010,
+  "leaked_stream_guard": 0,
+  "lag_chars_median": 4,
+  "lag_chars_p95": 13,
+  "cpu_us_per_chunk_p50": 14.5,
+  "cpu_us_per_chunk_p99": 59.6
+}

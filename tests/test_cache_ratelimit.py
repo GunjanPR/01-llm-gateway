@@ -39,8 +39,55 @@ async def test_rate_limiter_counts_per_tenant_and_window():
     limiter = RateLimiter(redis, limit_per_minute=2, clock=lambda: now[0])
     assert [(await limiter.hit("t1")).allowed for _ in range(3)] == [True, True, False]
     assert (await limiter.hit("t2")).allowed
-    now[0] = 180.0  # next window
+    now[0] = 240.0  # two windows later: nothing left in the last 60 s
     assert (await limiter.hit("t1")).allowed
+
+
+@pytest.mark.anyio
+async def test_rate_limiter_blocks_the_burst_across_a_window_boundary():
+    """A fixed window admits the limit at 0:59 and again at 1:00 (2x in two seconds)."""
+    redis = fakeredis.FakeAsyncRedis(decode_responses=True)
+    now = [119.0]
+    limiter = RateLimiter(redis, limit_per_minute=10, clock=lambda: now[0])
+    assert sum([(await limiter.hit("t")).allowed for _ in range(10)]) == 10
+    now[0] = 121.0  # the next window has just started
+    admitted = [(await limiter.hit("t")).allowed for _ in range(10)]
+    assert sum(admitted) == 0
+    rejected = await limiter.hit("t")
+    # 10 x (1 - 1/60) = 9.83 still counts, so the next request fits once that is <= 9:
+    # at 6 s into the window, 5 s from now.
+    assert not rejected.allowed and rejected.reset_seconds == 5
+    now[0] = 126.0
+    assert (await limiter.hit("t")).allowed
+
+
+@pytest.mark.anyio
+async def test_rate_limiter_steady_rate_over_many_windows():
+    """At twice the limit, about the limit gets through per minute, and never 2x."""
+    redis = fakeredis.FakeAsyncRedis(decode_responses=True)
+    now = [0.0]
+    limiter = RateLimiter(redis, limit_per_minute=30, clock=lambda: now[0])
+    admitted_at = []
+    for i in range(60 * 10):  # one request per second for 10 minutes
+        now[0] = float(i)
+        if (await limiter.hit("t")).allowed:
+            admitted_at.append(now[0])
+    worst = max(sum(1 for t in admitted_at if s <= t < s + 60) for s in range(0, 540))
+    assert worst <= 31  # any 60 s span, not just aligned windows
+    assert len(admitted_at) >= 30 * 9
+
+
+@pytest.mark.anyio
+async def test_rate_limit_headers():
+    redis = fakeredis.FakeAsyncRedis(decode_responses=True)
+    limiter = RateLimiter(redis, limit_per_minute=5, clock=lambda: 130.0)
+    result = await limiter.hit("t")
+    assert result.headers() == {
+        "x-ratelimit-limit": "5",
+        "x-ratelimit-remaining": "4",
+        "x-ratelimit-reset": "50",
+    }
+    assert (await RateLimiter(redis, 0).hit("t")).headers() == {}  # limiter off
 
 
 class DownRedis:

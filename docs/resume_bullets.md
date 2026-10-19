@@ -22,8 +22,12 @@ from this repo; copy what you want from here.
   (2,052 ms vs 0.4 ms) and fixed it in config handling, cutting first-request latency
   **534 → 179 ms** and post-idle latency **590 → 344 ms**, within 10 ms of calling the
   model directly (docs/benchmarks/2026-10-03-localhost).
-- Wrote 13 Prometheus alert rules unit-tested with promtool, and 145 unit tests including
-  failure-injection and concurrency tests.
+- Extended PII redaction to streamed answers, where an entity arrives split across chunks:
+  leaked entities fell from **2,010 of 2,010 to 0** on a 500-answer benchmark, with text
+  held back a median of 4 characters and about 11 µs of CPU per chunk; a property test
+  checks any chunking matches one-shot redaction (docs/benchmarks/2026-10-19-stream-redaction).
+- Wrote 13 Prometheus alert rules unit-tested with promtool, and 159 unit tests including
+  failure-injection, concurrency and property-based tests.
 
 Caveat to keep in mind in interviews: the CPU, overload and coalescing numbers use a mock
 backend on a cloud VM to isolate the gateway; the overhead, failover and localhost numbers are on
