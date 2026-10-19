@@ -1,0 +1,96 @@
+# Alert rules for the gateway. Evaluated by Prometheus (Alerts page on :9090).
+# Thresholds are set against the measured numbers in the README: the gateway's own
+# overhead is well under 5 ms, and a healthy local GPU answers in seconds.
+groups:
+  - name: llm-gateway-availability
+    rules:
+      - alert: GatewayDown
+        # Two scrape jobs exist (compose and host) and only one runs at a time.
+        expr: sum(up{job=~"llm-gateway.*"}) == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "No gateway instance is answering Prometheus scrapes"
+      - alert: AllBackendsUnreachable
+        expr: max(llmgw_backend_reachable) == 0
+        for: 30s
+        labels: {severity: critical}
+        annotations:
+          summary: "Every model backend fails its health probe; chat requests will 502"
+      - alert: BackendUnreachable
+        expr: llmgw_backend_reachable == 0
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: "Backend {{ $labels.backend }} fails its health probe (traffic fails over)"
+      - alert: CircuitBreakerOpen
+        expr: llmgw_backend_available == 0
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: "Circuit breaker for {{ $labels.backend }} is open after repeated failures"
+      - alert: RedisDown
+        # The cache and rate limiter fail open, so requests still succeed, but nothing is
+        # cached and tenants are not rate-limited.
+        expr: llmgw_redis_up == 0
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: "Redis is unreachable: caching and rate limiting are bypassed"
+
+  - name: llm-gateway-errors
+    rules:
+      - alert: HighServerErrorRate
+        expr: |
+          sum(rate(llmgw_http_responses_total{status="5xx"}[5m]))
+            / clamp_min(sum(rate(llmgw_http_responses_total[5m])), 1e-9) > 0.05
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "More than 5% of gateway responses are 5xx"
+      - alert: BackendErrorsRising
+        expr: sum by (backend) (rate(llmgw_backend_errors_total[5m])) > 0.2
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.backend }} fails more than 1 call in 5 s (retried or failed over)"
+      - alert: RedisErrors
+        expr: sum(rate(llmgw_redis_errors_total[5m])) > 0.1
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Redis operations are failing (cache/rate limiter running degraded)"
+      - alert: UsageLedgerDroppingRows
+        expr: increase(llmgw_ledger_dropped_total[10m]) > 0 or increase(llmgw_ledger_write_errors_total[10m]) > 3
+        labels: {severity: warning}
+        annotations:
+          summary: "Usage rows are being dropped or failing to write to PostgreSQL"
+
+  - name: llm-gateway-load
+    rules:
+      - alert: LoadShedding
+        expr: sum(rate(llmgw_load_shed_total[5m])) > 0
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Requests are being rejected with 503: every backend is at its concurrency limit"
+      - alert: BackendQueueWaitHigh
+        expr: histogram_quantile(0.95, sum by (le) (rate(llmgw_backend_queue_wait_seconds_bucket[5m]))) > 5
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "Requests wait more than 5 s (p95) for a free backend slot; add capacity"
+      - alert: GatewayOverheadHigh
+        # Measured p95 overhead is under 0.5 ms; 50 ms means the gateway itself is the
+        # bottleneck (CPU saturation, slow Redis).
+        expr: histogram_quantile(0.95, sum by (le) (rate(llmgw_gateway_overhead_seconds_bucket[5m]))) > 0.05
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "Gateway's own processing p95 above 50 ms"
+      - alert: StreamingTTFTHigh
+        expr: histogram_quantile(0.95, sum by (le) (rate(llmgw_ttft_seconds_bucket[5m]))) > 5
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "Streaming time to first token p95 above 5 s"

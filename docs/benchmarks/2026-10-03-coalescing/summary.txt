@@ -1,0 +1,4 @@
+before: backend_calls=186 errors:=0 throughput_rps:=32.5761 latency_p50_s:=0.0208 latency_p95_s:=4.0055 cache_hits:=214 
+after: backend_calls=86 errors:=0 throughput_rps:=67.9072 latency_p50_s:=0.5796 latency_p95_s:=2.0249 cache_hits:=238 
+before: backend_calls=181 errors:=0 throughput_rps:=34.0131 latency_p50_s:=0.0200 latency_p95_s:=4.0075 cache_hits:=219 
+after: backend_calls=86 errors:=0 throughput_rps:=68.1576 latency_p50_s:=0.4799 latency_p95_s:=2.3972 cache_hits:=229 

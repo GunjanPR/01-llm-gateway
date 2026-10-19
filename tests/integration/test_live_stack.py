@@ -1,12 +1,14 @@
 """End-to-end tests against the real stack: a running gateway, Redis and Ollama.
 
 Run with `make test-integration` after `make up` and `make run`. Configure with:
-    GATEWAY_URL (default http://localhost:8000), GATEWAY_TEST_KEY (one of GATEWAY_API_KEYS),
+    GATEWAY_URL (default http://127.0.0.1:8000), GATEWAY_TEST_KEY (one of GATEWAY_API_KEYS),
     GATEWAY_TEST_MODEL (default llama3.2), GATEWAY_TEST_EMBED_MODEL (default nomic-embed-text)
 """
 
+import asyncio
 import json
 import os
+import time
 import uuid
 
 import httpx
@@ -14,7 +16,7 @@ import pytest
 
 pytestmark = pytest.mark.integration
 
-URL = os.environ.get("GATEWAY_URL", "http://localhost:8000")
+URL = os.environ.get("GATEWAY_URL", "http://127.0.0.1:8000")
 KEY = os.environ.get("GATEWAY_TEST_KEY", "")
 MODEL = os.environ.get("GATEWAY_TEST_MODEL", "llama3.2")
 EMBED_MODEL = os.environ.get("GATEWAY_TEST_EMBED_MODEL", "nomic-embed-text")
@@ -44,6 +46,39 @@ def test_health_sees_redis_and_a_backend(client):
     body = client.get("/health").json()
     assert body["redis"] is True
     assert any(b["reachable"] for b in body["backends"])
+    assert body["status"] in {"ok", "degraded"}
+
+
+def test_identical_concurrent_requests_are_coalesced():
+    """Two identical requests at once on a cold cache: one generation, shared."""
+    body = chat(f"Reply with the single word OK. ({uuid.uuid4()})")
+
+    async def both():
+        async with httpx.AsyncClient(
+            base_url=URL, headers={"Authorization": f"Bearer {KEY}"}, timeout=120
+        ) as c:
+            return await asyncio.gather(
+                *(c.post("/v1/chat/completions", json=body) for _ in range(2))
+            )
+
+    responses = asyncio.run(both())
+    assert [r.status_code for r in responses] == [200, 200]
+    assert sorted(r.headers["x-gateway-cache"] for r in responses) == ["COALESCED", "MISS"]
+    assert responses[0].json() == responses[1].json()
+
+
+def test_client_disconnect_frees_the_backend():
+    """A client that gives up must not leave its call running on the backend."""
+    body = chat(f"Write a long story about a lighthouse. ({uuid.uuid4()})", max_tokens=400)
+    with pytest.raises(httpx.ReadTimeout), httpx.Client(timeout=0.3) as quick:
+        quick.post(
+            f"{URL}/v1/chat/completions",
+            json=body,
+            headers={"Authorization": f"Bearer {KEY}", "Cache-Control": "no-cache"},
+        )
+    time.sleep(0.5)
+    health = httpx.get(f"{URL}/health", timeout=10).json()
+    assert all(b["inflight"] == 0 for b in health["backends"])
 
 
 def test_real_completion_then_cache_hit(client):

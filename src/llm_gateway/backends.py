@@ -39,10 +39,20 @@ class OpenAICompatibleBackend:
         self.config = config
         self.name = config.name
         headers = {"Authorization": f"Bearer {config.api_key}"} if config.api_key else {}
+        limits = httpx.Limits(
+            max_connections=config.max_connections,
+            max_keepalive_connections=config.max_keepalive_connections,
+            keepalive_expiry=config.keepalive_seconds,
+        )
+        if transport is None and config.http_transport == "aiohttp":
+            from httpx_aiohttp import AiohttpTransport
+
+            transport = AiohttpTransport(limits=limits)
         self._client = httpx.AsyncClient(
             base_url=config.base_url,
             headers=headers,
             timeout=httpx.Timeout(config.timeout_seconds, connect=5.0),
+            limits=limits,
             transport=transport,
         )
 
@@ -59,7 +69,13 @@ class OpenAICompatibleBackend:
             raise BackendError(self.name, f"{type(exc).__name__}: {exc}") from exc
         if response.status_code >= 400:
             raise BackendError(self.name, _error_text(response), response.status_code)
-        return response.json()
+        try:
+            data = response.json()
+        except ValueError as exc:  # a proxy error page, a truncated body, ...
+            raise BackendError(self.name, f"invalid JSON from backend: {exc}", 502) from exc
+        if not isinstance(data, dict):
+            raise BackendError(self.name, "backend returned a non-object JSON body", 502)
+        return data
 
     async def chat(self, payload: dict[str, Any]) -> dict[str, Any]:
         return await self._post("/chat/completions", {**payload, "stream": False})

@@ -32,7 +32,7 @@ from redis.exceptions import RedisError, ResponseError
 
 from llm_gateway.backends import BackendError
 from llm_gateway.cache import IGNORED_FIELDS
-from llm_gateway.router import NoBackendAvailable, Router
+from llm_gateway.router import NoBackendAvailable, Overloaded, Router
 from llm_gateway.tracing import get_tracer
 
 logger = logging.getLogger(__name__)
@@ -222,7 +222,14 @@ class SemanticCache:
                 result.outcome = "rejected"
                 return result
             result.entry, result.outcome = entry, "hit"
-        except (RedisError, BackendError, NoBackendAvailable, KeyError, ValueError) as exc:
+        except (
+            RedisError,
+            BackendError,
+            NoBackendAvailable,
+            Overloaded,
+            KeyError,
+            ValueError,
+        ) as exc:
             logger.warning("semantic cache lookup failed, treating as miss: %s", exc)
             result.outcome = "error"
         finally:

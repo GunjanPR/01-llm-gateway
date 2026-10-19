@@ -31,7 +31,7 @@ def stage_means(metrics_text: str) -> dict[str, float]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--base-url", default="http://localhost:8000")
+    parser.add_argument("--base-url", default="http://127.0.0.1:8000")
     parser.add_argument("--api-key", required=True)
     parser.add_argument("--model", default="llama3.2")
     parser.add_argument("--max-tokens", type=int, default=48)

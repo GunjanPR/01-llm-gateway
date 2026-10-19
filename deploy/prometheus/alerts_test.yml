@@ -1,0 +1,58 @@
+# promtool test rules deploy/prometheus/alerts_test.yml  (run in CI)
+rule_files:
+  - alerts.yml
+evaluation_interval: 15s
+tests:
+  - interval: 15s
+    input_series:
+      - series: 'up{job="llm-gateway",deployment="compose"}'
+        values: '0x10'
+      - series: 'up{job="llm-gateway-host",deployment="host"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: GatewayDown
+        exp_alerts: []  # one instance is up: no alert
+  - interval: 15s
+    input_series:
+      - series: 'llmgw_backend_reachable{backend="ollama"}'
+        values: '1 1 0 0 0 0 0 0'
+      - series: 'llmgw_backend_reachable{backend="ollama-2"}'
+        values: '1 1 1 1 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 75s
+        alertname: AllBackendsUnreachable
+        exp_alerts: []  # down for 15 s only
+      - eval_time: 105s
+        alertname: AllBackendsUnreachable
+        exp_alerts:
+          - exp_labels: {severity: critical}
+            exp_annotations:
+              summary: "Every model backend fails its health probe; chat requests will 502"
+      - eval_time: 105s
+        alertname: BackendUnreachable
+        exp_alerts:
+          - exp_labels: {severity: warning, backend: ollama}
+            exp_annotations:
+              summary: "Backend ollama fails its health probe (traffic fails over)"
+  - interval: 1m
+    input_series:
+      - series: 'llmgw_load_shed_total{route="chat"}'
+        values: '0+10x15'
+      - series: 'llmgw_http_responses_total{path="/v1/chat/completions",status="2xx"}'
+        values: '0+90x15'
+      - series: 'llmgw_http_responses_total{path="/v1/chat/completions",status="5xx"}'
+        values: '0+10x15'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: LoadShedding
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "Requests are being rejected with 503: every backend is at its concurrency limit"
+      - eval_time: 12m
+        alertname: HighServerErrorRate
+        exp_alerts:
+          - exp_labels: {severity: critical}
+            exp_annotations:
+              summary: "More than 5% of gateway responses are 5xx"

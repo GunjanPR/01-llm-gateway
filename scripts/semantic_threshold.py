@@ -6,7 +6,7 @@ should share an answer) and the number of false hits (pairs that must not). A fa
 returns a wrong cached answer, so the threshold is chosen as the lowest value with zero
 false hits on this set.
 
-    python scripts/semantic_threshold.py --base-url http://localhost:8000/v1 --api-key $KEY
+    python scripts/semantic_threshold.py --base-url http://127.0.0.1:8000/v1 --api-key $KEY
 """
 
 import argparse
@@ -26,7 +26,7 @@ def cosine(a: list[float], b: list[float]) -> float:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--base-url", default="http://localhost:8000/v1")
+    parser.add_argument("--base-url", default="http://127.0.0.1:8000/v1")
     parser.add_argument("--api-key", default="")
     parser.add_argument("--model", default="nomic-embed-text")
     parser.add_argument("--pairs", default="eval/semantic_pairs.jsonl")

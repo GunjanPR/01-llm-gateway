@@ -1,4 +1,6 @@
-from llm_gateway.config import Settings, parse_models
+import pytest
+
+from llm_gateway.config import Settings, ipv4_loopback, parse_models
 
 
 def test_parse_models():
@@ -22,7 +24,7 @@ def test_backend_configs_from_settings():
     )
     backends = {b.name: b for b in settings.backend_configs()}
     assert list(backends) == ["vllm", "ollama", "groq"]
-    assert backends["ollama"].base_url == "http://localhost:11434/v1"
+    assert backends["ollama"].base_url == "http://127.0.0.1:11434/v1"
     assert backends["vllm"].base_url == "http://gpu:8001/v1"
     assert backends["groq"].upstream_model("llama3.2") == "llama-3.1-8b-instant"
     assert backends["groq"].cost_per_1k_input == 0.05
@@ -42,3 +44,64 @@ def test_multiple_ollama_nodes():
     backends = settings.backend_configs()
     assert [b.name for b in backends] == ["ollama", "ollama-2"]
     assert [b.base_url for b in backends] == ["http://a:11434/v1", "http://b:11435/v1"]
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("http://localhost:11434", "http://127.0.0.1:11434"),
+        ("http://LOCALHOST:11434/v1", "http://127.0.0.1:11434/v1"),
+        ("redis://localhost:6379/0", "redis://127.0.0.1:6379/0"),
+        ("postgresql://u:p@localhost:5432/db", "postgresql://u:p@127.0.0.1:5432/db"),
+        ("http://localhost", "http://127.0.0.1"),
+        ("http://localhost.example.com:80", "http://localhost.example.com:80"),
+        ("http://gpu-box:8001/v1", "http://gpu-box:8001/v1"),
+        ("http://[::1]:11434", "http://[::1]:11434"),
+        ("https://localhost:8443/v1", "https://localhost:8443/v1"),  # TLS: cert names the host
+        ("rediss://localhost:6380/0", "rediss://localhost:6380/0"),
+        (
+            "postgresql://u@localhost/db?sslmode=verify-full",
+            "postgresql://u@localhost/db?sslmode=verify-full",
+        ),
+    ],
+)
+def test_ipv4_loopback(url, expected):
+    assert ipv4_loopback(url) == expected
+
+
+def test_settings_rewrite_localhost_urls():
+    settings = Settings(
+        _env_file=None,
+        redis_url="redis://localhost:6379/0",
+        ollama_base_url="http://localhost:11434, http://gpu:11434",
+        ledger_database_url="postgresql://u:p@localhost:5432/db",
+        otel_exporter_otlp_endpoint="http://localhost:4318",
+    )
+    assert settings.redis_url == "redis://127.0.0.1:6379/0"
+    assert [b.base_url for b in settings.backend_configs()] == [
+        "http://127.0.0.1:11434/v1",
+        "http://gpu:11434/v1",
+    ]
+    assert settings.ledger_database_url == "postgresql://u:p@127.0.0.1:5432/db"
+    assert settings.otel_exporter_otlp_endpoint == "http://127.0.0.1:4318"
+
+
+def test_localhost_rewrite_can_be_disabled():
+    settings = Settings(
+        _env_file=None, prefer_ipv4_loopback=False, ollama_base_url="http://localhost:11434"
+    )
+    assert settings.ollama_base_url == "http://localhost:11434"
+
+
+def test_backend_pool_settings_reach_the_http_client():
+    from llm_gateway.backends import OpenAICompatibleBackend
+
+    settings = Settings(_env_file=None, backend_keepalive_seconds=90, backend_max_connections=7)
+    config = settings.backend_configs()[0]
+    assert config.http_transport == "aiohttp"
+    limits = OpenAICompatibleBackend(config)._client._transport.limits
+    assert limits.keepalive_expiry == 90 and limits.max_connections == 7
+
+    httpx_config = config.model_copy(update={"http_transport": "httpx"})
+    pool = OpenAICompatibleBackend(httpx_config)._client._transport._pool
+    assert pool._keepalive_expiry == 90 and pool._max_connections == 7

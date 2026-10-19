@@ -1,22 +1,25 @@
 """FastAPI app: the OpenAI-compatible gateway API."""
 
 import asyncio
+import contextlib
 import hashlib
 import hmac
 import json
 import logging
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, TypeVar
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from opentelemetry import trace
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from redis.asyncio import Redis
+from starlette.datastructures import MutableHeaders
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from llm_gateway import __version__
 from llm_gateway.backends import BackendError, OpenAICompatibleBackend
@@ -24,6 +27,7 @@ from llm_gateway.cache import ResponseCache, cache_key, is_cacheable
 from llm_gateway.config import Settings, get_settings
 from llm_gateway.guardrails import GuardrailReport, redact_response, scan_messages
 from llm_gateway.ledger import PostgresStore, UsageEvent, UsageLedger, Writer
+from llm_gateway.logs import configure_logging
 from llm_gateway.metrics import (
     GatewayMetrics,
     cost_usd,
@@ -32,11 +36,17 @@ from llm_gateway.metrics import (
     usage_from,
 )
 from llm_gateway.ratelimit import RateLimiter
-from llm_gateway.router import Backend, NoBackendAvailable, Router
+from llm_gateway.router import Backend, NoBackendAvailable, Overloaded, Router
 from llm_gateway.semantic_cache import RedisVectorIndex, SemanticCache, SemanticLookup, VectorIndex
 from llm_gateway.tracing import current_trace_id, get_tracer, setup_tracing
 
 logger = logging.getLogger("llm_gateway")
+T = TypeVar("T")
+# Not sent to anyone (the client is gone); used in logs, metrics and the usage ledger.
+CLIENT_CLOSED_STATUS = 499
+# Followers of a coalesced request wait through at most this many failed leaders before
+# calling the backend themselves.
+COALESCE_MAX_LEADERS = 3
 
 # Routes whose requests are written to the usage ledger, and their ledger names.
 LEDGER_ROUTES = {"/v1/chat/completions": "chat", "/v1/embeddings": "embeddings"}
@@ -57,6 +67,153 @@ class GatewayError(Exception):
         self.headers = headers or {}
 
 
+class RequestLogMiddleware:
+    """Tag every response with a request id (and trace id) and write its usage row.
+
+    Plain ASGI rather than `@app.middleware("http")`: Starlette's BaseHTTPMiddleware runs
+    each request through an extra task group and memory streams, which cost more CPU
+    per request than the rest of the gateway's own processing.
+    """
+
+    def __init__(self, app: ASGIApp, ledger: UsageLedger | None, metrics: GatewayMetrics) -> None:
+        self.app = app
+        self.ledger = ledger
+        self.metrics = metrics
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        request_id = uuid.uuid4()
+        state = scope.setdefault("state", {})
+        state["request_id"] = request_id
+        state["client_request_id"] = _client_request_id(scope)
+        trace_id = current_trace_id()
+        start = time.perf_counter()
+        status = 500
+
+        async def send_with_ids(message: Message) -> None:
+            nonlocal status
+            if message["type"] == "http.response.start":
+                status = message["status"]
+                headers = MutableHeaders(scope=message)
+                headers["x-request-id"] = str(request_id)
+                if trace_id:
+                    headers["x-trace-id"] = trace_id
+            await send(message)
+
+        self.metrics.inflight.inc()
+        try:
+            await self.app(scope, receive, send_with_ids)
+        finally:
+            self.metrics.inflight.dec()
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            route = scope.get("route")
+            path = getattr(route, "path", None) or "unmatched"
+            self.metrics.http_responses.labels(path, f"{status // 100}xx").inc()
+            usage = state.get("usage")
+            _log_access(scope, path, status, elapsed_ms, request_id, usage)
+            if self.ledger and usage is not None and not usage.pop("deferred", False):
+                self.ledger.record(
+                    UsageEvent(
+                        id=request_id,
+                        status=status,
+                        latency_ms=elapsed_ms,
+                        trace_id=trace_id,
+                        **usage,
+                    )
+                )
+
+
+QUIET_PATHS = {"/metrics", "/livez", "/readyz", "/health"}
+access_logger = logging.getLogger("llm_gateway.access")
+
+
+def _log_access(
+    scope: Scope,
+    path: str,
+    status: int,
+    elapsed_ms: float,
+    request_id: uuid.UUID,
+    usage: dict[str, Any] | None,
+) -> None:
+    """One line per request; probes and scrapes only at DEBUG so they don't drown the log."""
+    level = logging.DEBUG if path in QUIET_PATHS else logging.INFO
+    if status >= 500:
+        level = logging.WARNING
+    if not access_logger.isEnabledFor(level):
+        return
+    fields = {
+        "request_id": str(request_id),
+        "client_request_id": scope.get("state", {}).get("client_request_id"),
+        "method": scope["method"],
+        "path": scope["path"],
+        "status": status,
+        "latency_ms": round(elapsed_ms, 1),
+    }
+    fields = {k: v for k, v in fields.items() if v is not None}
+    if usage:
+        for key in ("tenant", "model", "backend", "cache", "prompt_tokens", "completion_tokens"):
+            if usage.get(key) is not None:
+                fields[key] = usage[key]
+    access_logger.log(
+        level,
+        "%s %s %s %.1fms",
+        scope["method"],
+        scope["path"],
+        status,
+        elapsed_ms,
+        extra={"fields": fields},
+    )
+
+
+def _client_request_id(scope: Scope) -> str | None:
+    """The caller's own X-Request-ID, logged next to ours so logs line up across services.
+
+    Never used as the gateway's request id: that is the usage ledger's primary key, and a
+    client reusing an id (a retry) must not be able to collide with another row.
+    """
+    for name, value in scope["headers"]:
+        if name == b"x-request-id":
+            text = value.decode("latin-1")[:128]
+            return "".join(c for c in text if c.isalnum() or c in "-_.:") or None
+    return None
+
+
+class ClientDisconnected(Exception):
+    """The client closed the connection before the backend answered."""
+
+
+async def _disconnected(request: Request) -> None:
+    """Return once the client has gone away (only call after the body has been read)."""
+    while (await request.receive())["type"] != "http.disconnect":
+        pass
+
+
+async def until_disconnect(request: Request, work: Awaitable[T]) -> T:
+    """Await `work`, cancelling it if the client disconnects first.
+
+    Without this, an abandoned request keeps its backend slot and keeps the GPU generating
+    an answer nobody will read; under overload those orphans pile up and every later
+    request queues behind them.
+    """
+    task = asyncio.ensure_future(work)
+    watcher = asyncio.ensure_future(_disconnected(request))
+    try:
+        await asyncio.wait({task, watcher}, return_when=asyncio.FIRST_COMPLETED)
+    except BaseException:  # we were cancelled ourselves (shutdown): don't orphan the work
+        task.cancel()
+        raise
+    finally:
+        watcher.cancel()
+    if task.done():
+        return task.result()
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    raise ClientDisconnected
+
+
 def _error_body(message: str, error_type: str) -> dict[str, Any]:
     return {"error": {"message": message, "type": error_type, "code": None}}
 
@@ -70,7 +227,7 @@ def create_app(
     span_exporter: Any = None,
 ) -> FastAPI:
     settings = settings or get_settings()
-    logging.basicConfig(level=settings.log_level.upper())
+    configure_logging(settings.log_level, settings.log_format)
     if backends is None:
         backends = [OpenAICompatibleBackend(cfg) for cfg in settings.backend_configs()]
     if not backends:
@@ -87,9 +244,17 @@ def create_app(
         breaker_failures=settings.circuit_breaker_failures,
         breaker_cooldown_seconds=settings.circuit_breaker_cooldown_seconds,
         on_backend_error=lambda e: metrics.backend_errors.labels(e.backend, e.kind).inc(),
+        max_concurrency=settings.backend_max_concurrency,
+        queue_timeout_seconds=settings.backend_queue_timeout_seconds,
+        on_queue_wait=metrics.queue_wait.observe,
     )
-    cache = ResponseCache(redis, settings.cache_ttl_seconds)
-    limiter = RateLimiter(redis, settings.rate_limit_rpm)
+    metrics.build_info.labels(__version__).set(1)
+
+    def redis_error(op: str) -> None:
+        metrics.redis_errors.labels(op).inc()
+
+    cache = ResponseCache(redis, settings.cache_ttl_seconds, on_error=redis_error)
+    limiter = RateLimiter(redis, settings.rate_limit_rpm, on_error=redis_error)
     semantic = (
         SemanticCache(
             vector_index or RedisVectorIndex(redis),
@@ -120,9 +285,61 @@ def create_app(
         if writer
         else None
     )
+    # Cache keys being answered right now -> the leader's result, for request coalescing
+    in_flight: dict[str, asyncio.Future[dict[str, Any] | None]] = {}
     api_keys = settings.api_keys
     if not api_keys:
         logger.warning("GATEWAY_API_KEYS is empty: every /v1 request will be rejected")
+
+    probe_state: dict[str, Any] = {"redis": None, "backends": {}, "at": None}
+
+    async def probe() -> tuple[bool, list[bool]]:
+        """Ping Redis and every backend concurrently; update the health gauges."""
+
+        async def redis_ok() -> bool:
+            try:
+                return bool(await redis.ping())
+            except Exception:  # Redis down: cache and rate limiter fail open
+                return False
+
+        redis_up, *reachable = await asyncio.gather(redis_ok(), *(b.health() for b in backends))
+        metrics.redis_up.set(1 if redis_up else 0)
+        for backend, up in zip(backends, reachable, strict=True):
+            metrics.backend_reachable.labels(backend.name).set(1 if up else 0)
+            if probe_state["backends"].get(backend.name, True) and not up:
+                logger.warning("backend %s is unreachable", backend.name)
+            elif probe_state["backends"].get(backend.name) is False and up:
+                logger.info("backend %s is reachable again", backend.name)
+            probe_state["backends"][backend.name] = up
+        if probe_state["redis"] is not False and not redis_up:
+            logger.warning("redis is unreachable: cache and rate limiting are bypassed")
+        elif probe_state["redis"] is False and redis_up:
+            logger.info("redis is reachable again")
+        probe_state["redis"] = redis_up
+        probe_state["at"] = datetime.now(UTC).isoformat(timespec="seconds")
+        return redis_up, reachable
+
+    async def warm_up() -> None:
+        """Open the Redis and backend connections now, so the first request doesn't pay
+        for TCP setup. Failures are logged, not fatal: the gateway still starts."""
+        t0 = time.perf_counter()
+        redis_up, reachable = await probe()
+        down = [b.name for b, up in zip(backends, reachable, strict=True) if not up]
+        logger.info(
+            "warm-up in %.0f ms: redis %s, backends down: %s",
+            (time.perf_counter() - t0) * 1000,
+            "up" if redis_up else "DOWN",
+            ", ".join(down) or "none",
+        )
+
+    async def monitor() -> None:
+        """Background probes, so the gauges (and alerts) catch outages with no traffic."""
+        while True:
+            await asyncio.sleep(settings.health_check_interval_seconds)
+            try:
+                await probe()
+            except Exception:  # never let the monitor die
+                logger.exception("health probe failed")
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -133,7 +350,14 @@ def create_app(
                 logger.warning("usage ledger database unavailable at startup: %s", exc)
         if ledger:
             ledger.start()
+        if settings.warm_up_connections:
+            await warm_up()
+        monitor_task = (
+            asyncio.create_task(monitor()) if settings.health_check_interval_seconds > 0 else None
+        )
         yield
+        if monitor_task:
+            monitor_task.cancel()
         if ledger:
             await ledger.stop()
         if store:
@@ -148,33 +372,23 @@ def create_app(
     app.state.metrics = metrics
     app.state.ledger = ledger
 
-    @app.middleware("http")
-    async def request_log(request: Request, call_next):
-        """Tag every response with a request id and write its usage row."""
-        request.state.request_id = uuid.uuid4()
-        trace_id = current_trace_id()
-        start = time.perf_counter()
-        response = await call_next(request)
-        response.headers["x-request-id"] = str(request.state.request_id)
-        if trace_id:
-            response.headers["x-trace-id"] = trace_id
-        usage = getattr(request.state, "usage", None)
-        if ledger and usage is not None and not usage.pop("deferred", False):
-            ledger.record(
-                UsageEvent(
-                    id=request.state.request_id,
-                    status=response.status_code,
-                    latency_ms=(time.perf_counter() - start) * 1000,
-                    trace_id=trace_id,
-                    **usage,
-                )
-            )
-        return response
+    app.add_middleware(RequestLogMiddleware, ledger=ledger, metrics=metrics)
 
     @app.exception_handler(GatewayError)
     async def _gateway_error(_: Request, exc: GatewayError) -> JSONResponse:
         return JSONResponse(
             _error_body(exc.message, exc.error_type), exc.status_code, headers=exc.headers
+        )
+
+    @app.exception_handler(Exception)
+    async def _unexpected_error(request: Request, exc: Exception) -> JSONResponse:
+        """A bug, not an upstream failure: log it with the request id, answer in OpenAI form."""
+        request_id = str(request.scope.get("state", {}).get("request_id", "-"))
+        logger.exception("unhandled error in %s (request %s)", request.url.path, request_id)
+        return JSONResponse(
+            _error_body(f"internal error (request {request_id})", "internal_error"),
+            500,
+            headers={"x-request-id": request_id},
         )
 
     async def tenant(request: Request) -> str:
@@ -202,16 +416,42 @@ def create_app(
         return tenant_id
 
     async def read_payload(request: Request) -> dict[str, Any]:
+        limit = settings.max_request_bytes
+        declared = request.headers.get("content-length", "")
+        too_big = GatewayError(413, f"request body exceeds {limit} bytes", "invalid_request_error")
+        if limit and declared.isdigit() and int(declared) > limit:
+            raise too_big
+        if limit:
+            chunks: list[bytes] = []
+            size = 0
+            async for chunk in request.stream():  # chunked bodies have no Content-Length
+                size += len(chunk)
+                if size > limit:
+                    raise too_big
+                chunks.append(chunk)
+            body = b"".join(chunks)
+        else:
+            body = await request.body()
         try:
-            payload = await request.json()
-        except json.JSONDecodeError as exc:
+            payload = json.loads(body)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             raise GatewayError(400, "request body must be JSON", "invalid_request_error") from exc
         if not isinstance(payload, dict):
             raise GatewayError(400, "request body must be a JSON object", "invalid_request_error")
         payload.setdefault("model", settings.default_model)
         return payload
 
+    def upstream_call(request: Request, work: Awaitable[T]) -> Awaitable[T]:
+        return until_disconnect(request, work) if settings.cancel_on_disconnect else work
+
     def upstream_failure(route: str, model: str, exc: Exception) -> GatewayError:
+        if isinstance(exc, ClientDisconnected):
+            metrics.requests.labels(route, model, "cancelled").inc()
+            return GatewayError(CLIENT_CLOSED_STATUS, "client disconnected", "client_closed")
+        if isinstance(exc, Overloaded):
+            metrics.requests.labels(route, model, "shed").inc()
+            metrics.load_shed.labels(route).inc()
+            return GatewayError(503, str(exc), "overloaded_error", headers={"Retry-After": "1"})
         metrics.requests.labels(route, model, "error").inc()
         if isinstance(exc, BackendError):  # client error passed through from the backend
             return GatewayError(exc.status_code or 400, exc.message, "invalid_request_error")
@@ -269,32 +509,46 @@ def create_app(
     def refresh_backend_gauges() -> None:
         for backend in backends:
             metrics.backend_up.labels(backend.name).set(1 if router.is_available(backend) else 0)
+            metrics.backend_inflight.labels(backend.name).set(router.state[backend.name].inflight)
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
-        """Liveness plus a quick, concurrent probe of Redis and every backend."""
+        """A live probe of Redis and every backend, plus circuit-breaker and load state.
+
+        status: ok = everything reachable; degraded = Redis or some backend is down, or a
+        circuit is open, but requests can still be served; down = no backend reachable.
+        Always HTTP 200: use /readyz for load-balancer decisions.
+        """
         refresh_backend_gauges()
-
-        async def redis_ok() -> bool:
-            try:
-                return bool(await redis.ping())
-            except Exception:  # report Redis as down instead of failing the health check
-                return False
-
-        redis_up, *reachable = await asyncio.gather(redis_ok(), *(b.health() for b in backends))
+        redis_up, reachable = await probe()
+        rows = [
+            {
+                "name": b.name,
+                "reachable": up,
+                "circuit_open": not router.is_available(b),
+                "inflight": router.state[b.name].inflight,
+                "saturated": router.is_saturated(b),
+                "ewma_latency_ms": (
+                    round(router.state[b.name].ewma_latency * 1000, 1)
+                    if router.state[b.name].ewma_latency is not None
+                    else None
+                ),
+                "models": list(b.config.models),
+            }
+            for b, up in zip(backends, reachable, strict=True)
+        ]
+        if backends and not any(r["reachable"] and not r["circuit_open"] for r in rows):
+            status = "down"
+        elif not redis_up or any(not r["reachable"] or r["circuit_open"] for r in rows):
+            status = "degraded"
+        else:
+            status = "ok"
         return {
-            "status": "ok",
+            "status": status,
             "version": __version__,
             "redis": redis_up,
-            "backends": [
-                {
-                    "name": b.name,
-                    "reachable": up,
-                    "circuit_open": not router.is_available(b),
-                    "models": list(b.config.models),
-                }
-                for b, up in zip(backends, reachable, strict=True)
-            ],
+            "backends": rows,
+            "max_concurrency_per_backend": settings.backend_max_concurrency or None,
         }
 
     @app.get("/livez")
@@ -351,43 +605,98 @@ def create_app(
                 span.set_attribute("llmgw.cache.hit", hit is not None)
         if hit:
             metrics.cache.labels("hit").inc()
-            metrics.requests.labels("chat", model, "cache_hit").inc()
-            metrics.saved_tokens.labels(model).inc(hit["prompt_tokens"] + hit["completion_tokens"])
-            metrics.saved_cost.labels(model).inc(hit["cost_usd"])
-            elapsed = time.perf_counter() - start
-            metrics.latency.labels("chat", model, hit["backend"], "hit").observe(elapsed)
-            usage.update(backend=hit["backend"], cache="HIT")
-            _annotate_span(usage)
-            return JSONResponse(
-                hit["response"],
-                headers=_headers(hit["backend"], "HIT", 0.0, elapsed, report),
-            )
+            return serve_stored(hit, "HIT", model, start, usage, report)
+        flight: asyncio.Future[dict[str, Any] | None] | None = None
         if key:
             metrics.cache.labels("miss").inc()
+            # An identical request already being answered is shared instead of generated
+            # twice (a cold-cache stampede). If its leader fails or its client leaves, a
+            # waiting follower takes over as the new leader and the rest follow it.
+            for _ in range(COALESCE_MAX_LEADERS):
+                leader = in_flight.get(key)
+                if leader is None:
+                    break
+                await asyncio.wait({leader})
+                if not leader.cancelled() and leader.exception() is None and leader.result():
+                    metrics.cache.labels("coalesced").inc()
+                    return serve_stored(leader.result(), "COALESCED", model, start, usage, report)
+            if key not in in_flight:
+                flight = asyncio.get_running_loop().create_future()
+                in_flight[key] = flight
+        try:
+            response, entry = await answer(request, payload, model, key, namespace, start, report)
+        except BaseException as exc:
+            if flight and not flight.done():
+                if isinstance(exc, Exception):
+                    flight.set_exception(exc)
+                    flight.exception()  # mark retrieved; followers inspect it themselves
+                else:
+                    flight.cancel()
+            raise
+        else:
+            if flight and not flight.done():
+                flight.set_result(entry)
+        finally:
+            if flight and in_flight.get(key) is flight:
+                del in_flight[key]
+        return response
+
+    def serve_stored(
+        hit: dict[str, Any],
+        state: str,
+        model: str,
+        start: float,
+        usage: dict[str, Any],
+        report: GuardrailReport,
+        similarity: float | None = None,
+    ) -> JSONResponse:
+        """Answer from a stored entry (exact hit, semantic hit, or a coalesced request)."""
+        outcome = {"HIT": "cache_hit", "SEMANTIC_HIT": "semantic_hit"}.get(state, "coalesced")
+        metrics.requests.labels("chat", model, outcome).inc()
+        metrics.saved_tokens.labels(model).inc(hit["prompt_tokens"] + hit["completion_tokens"])
+        metrics.saved_cost.labels(model).inc(hit["cost_usd"])
+        elapsed = time.perf_counter() - start
+        label = {"HIT": "hit", "SEMANTIC_HIT": "semantic_hit"}.get(state, "coalesced")
+        metrics.latency.labels("chat", model, hit["backend"], label).observe(elapsed)
+        headers = _headers(hit["backend"], state, 0.0, elapsed, report)
+        if similarity is not None:
+            headers["x-gateway-similarity"] = f"{similarity:.4f}"
+        usage.update(backend=hit["backend"], cache=state)
+        _annotate_span(usage)
+        return JSONResponse(hit["response"], headers=headers)
+
+    async def answer(
+        request: Request,
+        payload: dict[str, Any],
+        model: str,
+        key: str | None,
+        namespace: str,
+        start: float,
+        report: GuardrailReport,
+    ) -> tuple[JSONResponse, dict[str, Any] | None]:
+        """A cache miss: try the semantic cache, then the backends. Returns the response
+        and the stored entry (shared with coalesced identical requests)."""
+        usage = request.state.usage
         lookup = SemanticLookup()
-        if key and semantic:
-            lookup = await semantic.lookup(payload, namespace)
+        if key and semantic and router.has_free_slot(settings.semantic_cache_embed_model):
+            # Optional work: skipped rather than queued when backends are saturated
+            try:
+                lookup = await upstream_call(request, semantic.lookup(payload, namespace))
+            except ClientDisconnected as exc:
+                raise upstream_failure("chat", model, exc) from exc
             if lookup.entry:
                 hit = lookup.entry
-                metrics.requests.labels("chat", model, "semantic_hit").inc()
-                metrics.saved_tokens.labels(model).inc(
-                    hit["prompt_tokens"] + hit["completion_tokens"]
+                response = serve_stored(
+                    hit, "SEMANTIC_HIT", model, start, usage, report, lookup.similarity
                 )
-                metrics.saved_cost.labels(model).inc(hit["cost_usd"])
-                elapsed = time.perf_counter() - start
-                metrics.latency.labels("chat", model, hit["backend"], "semantic_hit").observe(
-                    elapsed
-                )
-                headers = _headers(hit["backend"], "SEMANTIC_HIT", 0.0, elapsed, report)
-                headers["x-gateway-similarity"] = f"{lookup.similarity:.4f}"
-                usage.update(backend=hit["backend"], cache="SEMANTIC_HIT")
-                _annotate_span(usage)
-                return JSONResponse(hit["response"], headers=headers)
+                return response, hit
 
         routed = time.perf_counter()
         try:
-            response, backend = await router.run(model, lambda b: b.chat(payload))
-        except (BackendError, NoBackendAvailable) as exc:
+            response, backend = await upstream_call(
+                request, router.run(model, lambda b: b.chat(payload))
+            )
+        except (BackendError, NoBackendAvailable, Overloaded, ClientDisconnected) as exc:
             raise upstream_failure("chat", model, exc) from exc
         upstream = time.perf_counter() - routed
         metrics.upstream_latency.labels("chat", backend.name).observe(upstream)
@@ -400,6 +709,7 @@ def create_app(
         cost = record_usage(model, backend, prompt, completion)
         if completion and upstream > 0:
             metrics.tokens_per_second.labels(model, backend.name).observe(completion / upstream)
+        entry = None
         if key:
             entry = {
                 "response": response,
@@ -425,9 +735,10 @@ def create_app(
             cost_usd=cost,
         )
         _annotate_span(usage)
-        return JSONResponse(
+        json_response = JSONResponse(
             response, headers=_headers(backend.name, cache_state, cost, elapsed, report)
         )
+        return json_response, entry
 
     async def stream_chat(
         request: Request, payload: dict[str, Any], model: str, report: GuardrailReport
@@ -436,8 +747,8 @@ def create_app(
         # Ask OpenAI-compatible servers to append a usage chunk at the end of the stream.
         payload = {**payload, "stream_options": {"include_usage": True}}
         try:
-            backend, lines, ttft = await router.open_stream(model, payload)
-        except (BackendError, NoBackendAvailable) as exc:
+            backend, lines, ttft = await upstream_call(request, router.open_stream(model, payload))
+        except (BackendError, NoBackendAvailable, Overloaded, ClientDisconnected) as exc:
             raise upstream_failure("chat_stream", model, exc) from exc
         metrics.ttft.labels(model, backend.name).observe(ttft)
         # The row is written when the stream ends, once token counts are known.
@@ -466,7 +777,11 @@ def create_app(
                 metrics.backend_errors.labels(exc.backend, exc.kind).inc()
                 error = json.dumps(_error_body(exc.message, "upstream_error"))
                 yield f"data: {error}\n\n".encode()
+            except (asyncio.CancelledError, GeneratorExit):
+                outcome = "cancelled"  # the client went away mid-stream
+                raise
             finally:
+                await lines.aclose()  # stop the upstream generation and free the slot
                 elapsed = time.perf_counter() - start
                 prompt = int(usage.get("prompt_tokens") or estimate_tokens(prompt_text(payload)))
                 completion = int(usage.get("completion_tokens") or estimate_tokens("".join(text)))
@@ -480,7 +795,7 @@ def create_app(
                             model=model,
                             backend=backend.name,
                             cache="BYPASS",
-                            status=200 if outcome == "ok" else 502,
+                            status={"ok": 200, "cancelled": CLIENT_CLOSED_STATUS}.get(outcome, 502),
                             prompt_tokens=prompt,
                             completion_tokens=completion,
                             cost_usd=cost,
@@ -517,8 +832,10 @@ def create_app(
             raise GatewayError(400, "'input' is required", "invalid_request_error")
         start = time.perf_counter()
         try:
-            response, backend = await router.run(model, lambda b: b.embeddings(payload))
-        except (BackendError, NoBackendAvailable) as exc:
+            response, backend = await upstream_call(
+                request, router.run(model, lambda b: b.embeddings(payload))
+            )
+        except (BackendError, NoBackendAvailable, Overloaded, ClientDisconnected) as exc:
             raise upstream_failure("embeddings", model, exc) from exc
         prompt, _ = usage_from(response)
         cost = record_usage(model, backend, prompt, 0)

@@ -20,19 +20,23 @@ the [Healthcare RAG](../02-healthcare-rag/) project. Requests can go to local mo
 | Auth | Bearer API keys (`GATEWAY_API_KEYS`), constant-time comparison; with no keys configured, every request is rejected |
 | Per-tenant rate limiting | Fixed one-minute window per API key in Redis (`INCR` + `EXPIRE`), shared across replicas, with a `Retry-After` header |
 | Routing policies | `cost` (cheapest $/1K tokens), `latency` (lowest observed EWMA latency), `quality` (highest configured score) |
-| Reliability | Retries with exponential backoff, fallback to the next backend, and a per-backend circuit breaker. Streams fall back only until the first token arrives. Bad requests (400/413/422) go straight back to the client, without retries. |
+| Reliability | Retries with exponential backoff, fallback to the next backend, and a per-backend circuit breaker. Streams fall back only until the first token arrives. Bad requests (400/413/422) go straight back to the client, without retries. A backend that answers 200 with a non-JSON body (a proxy error page) counts as a failure and is failed over. |
+| Load shedding | A per-backend concurrency cap (`BACKEND_MAX_CONCURRENCY`). A full backend spills over to the next one; when all are full, requests queue up to `BACKEND_QUEUE_TIMEOUT_SECONDS`, then get a fast 503 with `Retry-After` instead of a timeout. If a client disconnects, its backend call is cancelled, so the GPU stops generating an answer nobody will read. At 3× overload this kept goodput at the server's maximum instead of collapsing to under 10% of it ([results](#results-gateway-efficiency-and-overload-2026-10-03)). |
 | Model aliasing | Maps a public model name to each backend's own name, e.g. `llama3.2` → `llama3.2` on Ollama and `llama-3.1-8b-instant` on Groq, so fallback works across providers |
-| Response cache | Exact-match Redis cache keyed by a SHA-256 of the canonical request. Modes: `all`, `deterministic`, `off`. `Cache-Control: no-cache` bypasses it. Entries are kept separate per API key by default (`CACHE_SCOPE=tenant`). |
+| Response cache | Exact-match Redis cache keyed by a SHA-256 of the canonical request. Modes: `all`, `deterministic`, `off`. `Cache-Control: no-cache` bypasses it. Entries are kept separate per API key by default (`CACHE_SCOPE=tenant`). Identical requests that arrive while the first is still generating wait for its answer instead of generating it again (request coalescing). |
 | Semantic cache | Reuses an answer when a new prompt *means* the same as a cached one: `nomic-embed-text` embeddings, Redis 8 vector search (HNSW, cosine), then an LLM verifier. 27/27 paraphrases hit with 0/34 false hits on the tuning set; 8/10 hits with 0/10 false hits on a held-out set. See [Semantic cache](#semantic-cache). |
 | Cost tracking | Token usage from the backend, or estimated if the backend doesn't report it, times $/1K pricing per backend. The cost of each request goes in the `x-gateway-cost-usd` header. |
 | Usage ledger | One PostgreSQL row per request: tenant, model, backend, cache result, status, tokens, cost, latency and guardrail findings, including rejected and failed requests. Writes are batched in the background, so they never slow a response. `GET /v1/usage` returns the caller's own totals per model. Every response has an `x-request-id` that matches its row. |
 | Guardrails | PII redaction (email, phone, SSN, credit card with a Luhn check, IP address) on prompts and responses, and prompt-injection detection (5 rule families). Each can be off, flag/redact, or block; see [Guardrails](#guardrails) |
-| Resilience | If Redis goes down, cache and rate limiting are skipped (fail open) instead of failing requests |
-| Metrics | Prometheus `/metrics`: requests by outcome, latency histograms, TTFT, tokens/s, tokens, spend, cache hits and savings, backend errors, breaker state |
-| Dashboards | A provisioned Grafana dashboard (18 panels), including per-request gateway overhead, semantic cache outcomes and guardrail events |
+| Resilience | If Redis goes down, cache and rate limiting are skipped (fail open) and counted in `llmgw_redis_errors_total`; corrupt cache entries are treated as misses. Oversized bodies get 413 (`MAX_REQUEST_BYTES`). An unexpected error returns an OpenAI-style 500 that names the request id. |
+| Health | `/health` probes Redis and every backend live and reports `ok` / `degraded` / `down`, with circuit state, in-flight calls, saturation and EWMA latency per backend. Background probes (`HEALTH_CHECK_INTERVAL_SECONDS`) log state changes and feed gauges, so an outage shows up with no traffic. `/livez` and `/readyz` are for Kubernetes. |
+| Logging | One access-log line per request: request id, status, latency, tenant, model, backend, cache result. `LOG_FORMAT=json` writes JSON lines that include the trace id. A caller's own `X-Request-ID` is logged as `client_request_id`, so logs line up across services. |
+| Metrics | Prometheus `/metrics`: requests by outcome (incl. `shed`, `cancelled`, `coalesced`), latency histograms, TTFT, tokens/s, tokens, spend, cache hits and savings, backend errors, breaker state, in-flight requests per backend, queue wait, load shedding, backend/Redis probe results, Redis errors, responses by route and status class |
+| Dashboards | A provisioned Grafana dashboard (24 panels), including per-request gateway overhead, semantic cache outcomes, guardrail events and a load/resilience row |
+| Alerts | 13 Prometheus alert rules ([deploy/prometheus/alerts.yml](deploy/prometheus/alerts.yml)): gateway down, backends unreachable, circuit open, Redis down, 5xx rate, backend errors, ledger drops, load shedding, queue wait, gateway overhead, streaming TTFT. Unit-tested with `promtool` in CI; a test fails if a panel or alert queries a metric the gateway doesn't export. |
 | Tracing | OpenTelemetry: one trace per request in Jaeger, with spans for guardrails, the exact cache, semantic embed/search/verify, every router attempt, the backend HTTP call and each Redis command. `x-trace-id` on every response; the trace id is also stored in the usage ledger. |
 
-Every response carries `x-gateway-backend`, `x-gateway-cache` (`HIT`/`SEMANTIC_HIT`/`MISS`/`BYPASS`; semantic hits also send `x-gateway-similarity`),
+Every response carries `x-request-id`, `x-gateway-backend`, `x-gateway-cache` (`HIT`/`SEMANTIC_HIT`/`COALESCED`/`MISS`/`BYPASS`; semantic hits also send `x-gateway-similarity`),
 `x-gateway-cost-usd` and `x-gateway-latency-ms` headers, plus `x-gateway-guardrails` (e.g.
 `pii_email=1,injection=ignore_instructions`) when a guardrail fires.
 
@@ -164,7 +168,7 @@ added latency. Embedding requests aren't guarded, so RAG documents keep their or
 
 | Layer | Tools |
 |---|---|
-| API | FastAPI (async), Uvicorn, httpx |
+| API | FastAPI (async), Uvicorn; backend calls through the httpx API on an aiohttp transport |
 | Cache / rate limits | Redis 8 (includes vector search for the semantic cache) |
 | Model backends | Ollama (native, GPU), vLLM, any OpenAI-compatible hosted API (e.g. Groq) |
 | Observability | Prometheus, Grafana, OpenTelemetry → Jaeger |
@@ -179,9 +183,9 @@ added latency. Embedding requests aren't guarded, so RAG documents keep their or
 | **API layer** | `main.py` | OpenAI-compatible routes, validation, SSE streaming, OpenAI-style errors |
 | **Auth & rate limiter** | `main.py`, `ratelimit.py` | API-key check, per-tenant limit in Redis |
 | **Cache** | `cache.py` | Exact-match response cache in Redis |
-| **Router** | `router.py` | Ranks backends by policy; retries, fallback, circuit breaker |
-| **Backend adapter** | `backends.py` | One httpx client per OpenAI-compatible upstream; maps errors to retryable or client errors |
-| **Telemetry** | `metrics.py` | Prometheus metrics, token accounting, cost |
+| **Router** | `router.py` | Ranks backends by policy; retries, fallback, circuit breaker, per-backend concurrency cap with spillover and queueing |
+| **Backend adapter** | `backends.py` | One pooled HTTP client per OpenAI-compatible upstream (httpx API, aiohttp transport); maps errors to retryable or client errors |
+| **Telemetry** | `metrics.py`, `logs.py` | Prometheus metrics, token accounting, cost; text or JSON logging |
 | **Config** | `config.py` | `pydantic-settings` from env / `.env`; builds the backend list |
 
 ```
@@ -242,9 +246,21 @@ Every variable is documented in [.env.example](.env.example). The ones you'll mo
   name to an Ollama tag.
 - `ROUTING_POLICY`: `cost`, `latency` or `quality`.
 - `CACHE_MODE`: `all`, `deterministic` or `off`.
+- `BACKEND_MAX_CONCURRENCY`: concurrent calls per backend before spilling over or
+  queueing. About twice Ollama's `OLLAMA_NUM_PARALLEL` works well.
 - `HOSTED_*`: an optional second provider. Set `HOSTED_BASE_URL`, `HOSTED_API_KEY`,
   `HOSTED_MODELS` (for example `llama3.2=llama-3.1-8b-instant`) and its prices, to get real
   cross-provider fallback.
+
+> **Windows: use `127.0.0.1`, not `localhost`.** Windows resolves `localhost` to IPv6
+> (`::1`) first, and Ollama listens only on IPv4. On the RTX 4050 laptop a fresh TCP
+> connection to `localhost:11434` took **2,052 ms** (median of 20) against **0.4 ms** for
+> `127.0.0.1`, and each new HTTP client connection paid about +267 ms. The gateway
+> rewrites `localhost` to `127.0.0.1` in its backend, Redis, Postgres and OTLP URLs
+> (`PREFER_IPV4_LOOPBACK=true`, the default), keeps backend connections open for 60 s,
+> and opens them at startup. End to end with `.env` still saying `localhost`, a 1-token
+> request after 7 s idle went from **590 ms to 344 ms** (direct to Ollama: 343 ms); see
+> [Results: localhost fix on the laptop](#results-localhost-fix-on-the-laptop-2026-10-04).
 
 ## How to Run
 
@@ -394,6 +410,14 @@ noise. Its own processing takes **under 0.5 ms for 95% of requests**. With half 
 repeated, the cache raised throughput by **74%**. Availability stayed at **100%** when a
 backend was killed under load.
 
+**Re-measured on this branch (2026-10-04,** [2026-10-03-overhead](docs/benchmarks/2026-10-03-overhead/)**):**
+same method and laptop on AC, with the localhost fix, aiohttp transport and ASGI
+middleware. 1-token overhead was **+1.8 ms at p50** (direct 40.8 ms, gateway 42.6 ms,
+median of 3×100). Streaming TTFT showed no measurable difference (55.0 vs 54.6 ms). The
+in-process histogram put all 306 requests at 1 ms or less and 97.7% at 0.5 ms or less,
+mean 0.34 ms (was 0.39 ms). Run-to-run spread on the direct baseline was about 5 ms
+(40.8 to 46.0 ms), so read +1.8 vs +4.2 ms as "about 2 to 4 ms", not a precise gain.
+
 ![Grafana dashboard during the benchmark and failover runs](docs/grafana-dashboard.png)
 
 *The dashboard during the runs above: load, cache and streaming runs, then the failover
@@ -414,6 +438,64 @@ Cost grows linearly with prompt size, about 0.11 µs per character. Two changes 
 the five PII patterns were merged into one single-pass regex, and each injection rule now
 runs only when one of its trigger words is present. Even a 20k-character context costs
 under 0.1% of a ~9.5 s generation.
+
+### Results: gateway efficiency and overload (2026-10-03)
+
+These isolate the gateway with `scripts/mock_upstream.py`, an OpenAI-compatible fake
+backend with fixed latency and a GPU-like parallelism limit. They ran on a 4-vCPU Linux
+VM, not the laptop. Methods and raw data are in each linked folder.
+
+**CPU per request** ([2026-10-03-cpu-profile](docs/benchmarks/2026-10-03-cpu-profile/)),
+0 ms backend, 32 concurrent clients. This is the gateway process's CPU time per request,
+which sets how much traffic one process can proxy:
+
+| | Cache miss | Cache hit | Streaming |
+|---|---|---|---|
+| Before | 3.98 ms | 1.63 ms | 4.15 ms |
+| After: plain ASGI middleware + aiohttp transport | **1.61 ms (−60%)** | **1.18 ms (−28%)** | **2.15 ms (−48%)** |
+
+py-spy showed Starlette's `BaseHTTPMiddleware` and httpcore's connection-pool scan as the
+two largest costs.
+
+**3× overload, clients time out after 2 s** ([2026-10-03-overload](docs/benchmarks/2026-10-03-overload/)).
+Each mock server does at most 20 req/s (4 parallel × 200 ms); 64 users, 600 requests:
+
+| | Succeeded | Goodput | p95 of successes |
+|---|---|---|---|
+| 1 server, before | 36 / 600 | 1.9 req/s | 1.94 s |
+| 1 server, with cap + cancellation | 191 / 600 | **19.3 req/s** (max 20) | 1.21 s |
+| 2 servers, before | 36 / 600 | 1.8 req/s | 1.97 s |
+| 2 servers, with cap + spillover | 367 / 600 | **38.6 req/s** (max 40) | 1.22 s |
+
+Before, timed-out requests kept generating and clogged the server queue, and the second
+server sat idle. After, everything admitted finishes within the deadline and the rest get
+a fast 503 with `Retry-After`.
+
+**Request coalescing** ([2026-10-03-coalescing](docs/benchmarks/2026-10-03-coalescing/)).
+Cold-cache burst, 80% repeated prompts, 64 users, mock GPU with 8 slots × 500 ms:
+backend calls **186 → 86**, throughput **33 → 68 req/s**, p95 **4.0 → 2.0–2.4 s**. The
+median rose from 0.02 to about 0.5 s, because requests that used to be instant late cache
+hits now wait for an in-flight leader.
+
+### Results: localhost fix on the laptop (2026-10-04)
+
+RTX 4050 laptop on AC, real Ollama (`llama3.2`, 1-token answers, every prompt unique, cache
+bypassed), `.env` left at `OLLAMA_BASE_URL=http://localhost:11434`. Before is `main`,
+after is this branch, direct skips the gateway. Two rounds pooled, 0 errors
+([2026-10-03-localhost](docs/benchmarks/2026-10-03-localhost/)). Client-measured median
+(p95), ms:
+
+| Phase | Before | After | Direct to Ollama |
+|---|---|---|---|
+| First request after startup | 534 | **179** | 167 |
+| After 7 s idle (25 × 2) | 590 (605) | **344 (349)** | 343 (347) |
+| Back-to-back (50 × 2) | 44.4 (159) | **38.7 (155)** | 37.6 (153) |
+| 8 concurrent (40 × 2) | 270 (476) | **260 (290)** | 266 (273) |
+
+Before paid about 250 ms whenever it opened a backend connection, which is every request
+after more than 5 s idle (httpx's default keep-alive) and every new pooled connection
+under concurrency. After is within about 10 ms of calling Ollama directly. The 343 ms idle
+time for direct calls is Ollama waking the GPU, not the gateway.
 
 ### Results: Kaggle T4, full GPU power
 
@@ -454,6 +536,8 @@ Milestones follow [SHARED_STANDARDS.md](../SHARED_STANDARDS.md). Each one has a 
 
 ### M4: Evaluation & testing
 - [x] Unit tests for router, limiter, caches, config, guardrails and API (91 tests)
+- [x] Failure and load tests: load shedding, spillover, disconnect cancellation, coalescing, Redis outage, bad upstream replies, 300 overlapping requests, both HTTP transports over real sockets (145 tests total)
+- [x] Overload, coalescing and CPU-per-request benchmarks against a mock backend
 - [x] Integration tests against the real stack written (`tests/integration/`)
 - [x] Integration tests run green against real Ollama + Redis (8/8)
 - [x] Benchmark harness (`scripts/bench.py`) with a direct-to-backend baseline
@@ -468,6 +552,7 @@ Milestones follow [SHARED_STANDARDS.md](../SHARED_STANDARDS.md). Each one has a 
 - [x] Dashboard verified with live traffic (screenshot in README)
 - [x] In-process gateway overhead histogram (`llmgw_gateway_overhead_seconds`)
 - [x] OpenTelemetry tracing to Jaeger (gateway, router, cache, guardrail, httpx and Redis spans; trace id in headers and ledger)
+- [x] Alert rules (13, promtool-tested in CI), structured access logs, background health probes
 
 ### M6: Containerization & CI/CD
 - [x] Dockerfile and `docker-compose.yml` (gateway, Redis, Prometheus, Grafana; optional Ollama profile)
@@ -499,10 +584,12 @@ Milestones follow [SHARED_STANDARDS.md](../SHARED_STANDARDS.md). Each one has a 
 │   ├── cache.py           # Redis response cache
 │   ├── ratelimit.py       # Redis per-tenant rate limiter
 │   ├── metrics.py         # Prometheus metrics, tokens, cost
+│   ├── logs.py            # text / JSON logging
 │   └── config.py          # settings + backend list
 ├── tests/                 # unit tests; tests/integration/ = live stack
 ├── scripts/bench.py       # load test / benchmark
 ├── scripts/failover.py    # availability while a backend is killed
+├── scripts/mock_upstream.py  # fake backend: latency, GPU-like parallelism, error injection
 ├── scripts/guardrail_bench.py  # guardrail latency by prompt size
 ├── scripts/semantic_threshold.py  # similarity distribution of labelled pairs
 ├── scripts/semantic_bench.py      # end-to-end semantic cache evaluation
@@ -510,7 +597,7 @@ Milestones follow [SHARED_STANDARDS.md](../SHARED_STANDARDS.md). Each one has a 
 ├── scripts/k8s_secret.py  # Kubernetes Secret from .env (values never printed)
 ├── eval/                  # labelled prompt pairs (tuning + held-out)
 ├── notebooks/kaggle_benchmark.ipynb  # reproducible GPU benchmark on Kaggle
-├── deploy/                # Prometheus config, Grafana provisioning + dashboard
+├── deploy/                # Prometheus config + alert rules (and tests), Grafana provisioning + dashboard
 ├── k8s/                   # Kubernetes manifests (kubectl apply -k k8s/), see k8s/README.md
 ├── .github/workflows/ci.yml
 ├── Dockerfile

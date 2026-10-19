@@ -1,0 +1,18 @@
+# HELP llmgw_gateway_overhead_seconds Time the gateway adds per request: total handling time minus backend wait
+# TYPE llmgw_gateway_overhead_seconds histogram
+llmgw_gateway_overhead_seconds_bucket{le="0.0001",route="chat"} 0.0
+llmgw_gateway_overhead_seconds_bucket{le="0.00025",route="chat"} 0.0
+llmgw_gateway_overhead_seconds_bucket{le="0.0005",route="chat"} 299.0
+llmgw_gateway_overhead_seconds_bucket{le="0.001",route="chat"} 306.0
+llmgw_gateway_overhead_seconds_bucket{le="0.0025",route="chat"} 306.0
+llmgw_gateway_overhead_seconds_bucket{le="0.005",route="chat"} 306.0
+llmgw_gateway_overhead_seconds_bucket{le="0.01",route="chat"} 306.0
+llmgw_gateway_overhead_seconds_bucket{le="0.025",route="chat"} 306.0
+llmgw_gateway_overhead_seconds_bucket{le="0.05",route="chat"} 306.0
+llmgw_gateway_overhead_seconds_bucket{le="0.1",route="chat"} 306.0
+llmgw_gateway_overhead_seconds_bucket{le="+Inf",route="chat"} 306.0
+llmgw_gateway_overhead_seconds_count{route="chat"} 306.0
+llmgw_gateway_overhead_seconds_sum{route="chat"} 0.10302630061050877
+# HELP llmgw_gateway_overhead_seconds_created Time the gateway adds per request: total handling time minus backend wait
+# TYPE llmgw_gateway_overhead_seconds_created gauge
+llmgw_gateway_overhead_seconds_created{route="chat"} 1.7911025727530751e+09
