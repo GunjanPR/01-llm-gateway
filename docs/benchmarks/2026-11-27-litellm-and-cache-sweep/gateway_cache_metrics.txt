@@ -1,0 +1,10 @@
+llmgw_cache_saved_cost_usd_total{model="llama3.2"} 0.0
+llmgw_cache_saved_cost_usd_created{model="llama3.2"} 1.7957604204742393e+09
+llmgw_cache_saved_tokens_total{model="llama3.2"} 41399.0
+llmgw_cache_saved_tokens_created{model="llama3.2"} 1.7957604204742393e+09
+llmgw_cache_requests_total{result="miss"} 634.0
+llmgw_cache_requests_total{result="coalesced"} 28.0
+llmgw_cache_requests_total{result="hit"} 376.0
+llmgw_cache_requests_created{result="miss"} 1.795760373189562e+09
+llmgw_cache_requests_created{result="coalesced"} 1.7957604204742393e+09
+llmgw_cache_requests_created{result="hit"} 1.7957604204789445e+09
