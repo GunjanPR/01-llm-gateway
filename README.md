@@ -375,6 +375,7 @@ node is killed mid-run. Results are written to `/kaggle/working/results/`: `summ
     GPU is held to a **20 W power limit** (default 60 W, maximum 75 W). Comparisons between
     direct and gateway stay valid because both run under the same limit, but absolute
     tokens/s are below what this GPU can do.
+  - *Desktop (from 2026-11-27):* AMD Ryzen 7 9800X3D, RTX 5070 Ti 16 GB at full power.
   - *Full-speed, reproducible:* the Kaggle notebook above.
 - **Raw data:** [docs/benchmarks/2026-10-02-local-usbc/](docs/benchmarks/2026-10-02-local-usbc/)
   (one JSON line per run).
@@ -418,6 +419,26 @@ median of 3×100). Streaming TTFT showed no measurable difference (55.0 vs 54.6 
 in-process histogram put all 306 requests at 1 ms or less and 97.7% at 0.5 ms or less,
 mean 0.34 ms (was 0.39 ms). Run-to-run spread on the direct baseline was about 5 ms
 (40.8 to 46.0 ms), so read +1.8 vs +4.2 ms as "about 2 to 4 ms", not a precise gain.
+
+### Results: desktop, RTX 5070 Ti (measured 2026-11-27)
+
+Same method, on a desktop: AMD Ryzen 7 9800X3D, RTX 5070 Ti 16 GB at full power, Windows 11,
+Ollama 0.35.0 with `llama3.2`, Redis and Postgres in Docker Desktop 4.100.1. **0 errors across
+920 benchmark requests.** Raw data and per-run tables:
+[docs/benchmarks/2026-11-27-xtrrage/](docs/benchmarks/2026-11-27-xtrrage/summary.md).
+
+| What | Direct to Ollama (baseline) | Through the gateway | Difference |
+|---|---|---|---|
+| **Overhead:** 1-token completions, 1 client, 3×100 requests, median of run p50s | 16.2 ms | 19.3 ms | **+3.1 ms** at p50 |
+| **Overhead, in-process:** gateway's own histogram, 409 requests | – | 50.9% ≤ 0.25 ms, 93.6% ≤ 0.5 ms, mean 0.37 ms | unchanged from the laptop |
+| **Load:** 4 clients, 64-token answers, 2×40 requests, mean of run p50s | 0.93 s | 0.92 s | within noise |
+| **Load throughput** | 4.24 req/s, 270 tok/s | 4.34 req/s, 276 tok/s | none |
+| **Streaming TTFT:** 1 client, 2×30 requests, mean of run p50s | 20.3 ms | 22.9 ms | +2.6 ms |
+| **Cache:** 50% repeated prompts, 4 clients, 40 requests | – | 17 hits (42.5%); 10.61 req/s vs 4.34 uncached | **+144% throughput** (one 40-request run) |
+
+The backend is about **10× faster** than on the 20 W laptop (26.5 → about 270 tok/s), part of
+it from the laptop's power cap. The gateway's own cost did not change: 0.37 ms in-process and
++3.1 ms client-side, inside the laptop's 2 to 4 ms range. Failover was not re-run here.
 
 ![Grafana dashboard during the benchmark and failover runs](docs/grafana-dashboard.png)
 
