@@ -1,6 +1,6 @@
 # Localhost fix: before/after benchmark
 
-Measures the Windows `localhost` -> `::1` connect delay fix on branch `claude/project-thread-x3jux6`.
+Measures the Windows `localhost` -> `::1` connect delay fix on the optimization branch (since merged to `main`).
 Run on 2026-10-04 with the GPU otherwise idle. A pre-check of 10 direct 1-token requests took 33-162 ms each.
 
 ## Setup

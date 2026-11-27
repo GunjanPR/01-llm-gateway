@@ -1,6 +1,6 @@
 # Gateway overhead re-measurement (branch head)
 
-This re-measures the README's headline overhead with the code on `claude/project-thread-x3jux6`, using the README's own method.
+This re-measures the README's headline overhead with the code on the optimization branch (since merged to `main`), using the README's own method.
 
 ## Setup
 
