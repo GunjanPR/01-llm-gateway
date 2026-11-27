@@ -365,7 +365,8 @@ node is killed mid-run. Results are written to `/kaggle/working/results/`: `summ
 
 ## Evaluation & Results
 
-- **Baseline:** the same requests sent directly to Ollama, with no gateway.
+- **Baselines:** the same requests sent directly to the backend (no gateway), and through
+  LiteLLM proxy, an existing open-source gateway, to answer "why not use an existing one?".
 - **Metrics:** p50/p95 latency overhead the gateway adds, TTFT, completion tokens/s, cache
   hit rate and latency on hits, cost per 1K tokens, and availability when a backend fails.
 - **Method:** `scripts/bench.py` with a fixed seed and prompt set. Failover is tested by
@@ -444,6 +445,61 @@ it from the laptop's power cap. The gateway's own cost did not change: 0.37 ms i
 
 *The dashboard during the runs above: load, cache and streaming runs, then the failover
 (backend errors spike, the dead node's breaker opens) and the overhead run.*
+
+### Results: against LiteLLM, and the cache-hit sweep (desktop, 2026-11-27)
+
+Ollama 0.40.18 with `llama3.2` on the RTX 5070 Ti, nothing else running; gateway with rate
+limiting, semantic cache and trace export off; LiteLLM 1.111.0 proxy with no cache and no
+callbacks. **0 errors in 3,100 requests.**
+[Details and raw data](docs/benchmarks/2026-11-27-litellm-and-cache-sweep/summary.md).
+
+| 1-token requests, 1 client, 3×100 alternating, median of run p50s | p50 | Added vs direct | req/s |
+|---|---:|---:|---:|
+| Direct to Ollama | 16.5 ms | – | 60.2 |
+| This gateway | 17.4 ms | **+0.9 ms** | 57.1 |
+| LiteLLM proxy | 33.6 ms | +17.1 ms | 29.3 |
+
+Under load (64-token answers, 200 requests at 4 and at 16 clients), all three sit at the GPU's
+limit of about 4.4 req/s (about 281 tok/s); the gaps there are under 5% from single runs, so
+noise. LiteLLM's `ollama_chat/` prefix calls Ollama's native `/api/chat` while the other two
+use `/v1`, so part of its gap may be the route, not the proxy. This compares raw proxy cost
+only. LiteLLM supports far more providers than this gateway, which is the main reason to choose it.
+
+Exact-cache sweep through the gateway (cache on, 200 requests, 4 clients, 64 tokens, cache
+cleared before each run):
+
+| Repeated prompts | Cache hits | p50 | p95 | req/s | vs no repeats |
+|---:|---:|---:|---:|---:|---:|
+| 0% | 0 | 906 ms | 914 ms | 4.44 | 1.0× |
+| 20% | 40 (20%) | 903 ms | 915 ms | 5.70 | 1.3× |
+| 40% | 78 (39%) | 685 ms | 914 ms | 7.79 | 1.8× |
+| 60% | 111 (56%) | 7.5 ms | 914 ms | 11.02 | 2.5× |
+| 80% | 147 (74%) | 4.7 ms | 901 ms | 19.37 | 4.4× |
+
+A further 28 repeats arrived while their original was still generating and were coalesced
+(waited for it) rather than counted as hits. The gain is set by the repeat ratio of the
+traffic, so these are a range, not a single claim; p95 stays at generation time because misses
+still generate.
+
+### Results: vLLM vs Ollama, and the gateway in front of vLLM (desktop, 2026-11-27)
+
+vLLM 0.34.0 (Docker, BF16 `Qwen2.5-3B-Instruct`, 0.8 GPU memory, 4,096 context) vs Ollama
+0.40.18 (`qwen2.5:3b`, 4-bit Q4_K_M). The weights differ (BF16 vs 4-bit), so this compares
+the two serving setups as you would deploy them, not the engines alone. The backends never
+shared the GPU. 200 requests per cell, up to 128 tokens (about 59 generated on average on
+both). **0 errors in 1,800 requests.**
+[Details and raw data](docs/benchmarks/2026-11-27-vllm/summary.md).
+
+| Clients | Ollama p50 / p95, req/s | vLLM p50 / p95, req/s | Gateway → vLLM p50 / p95, req/s |
+|---:|---|---|---|
+| 1 | **229 / 315 ms, 4.34** | 496 / 704 ms, 1.97 | 496 / 691 ms, 1.96 |
+| 4 | 896 / 1,054 ms, 4.50 | **535 / 802 ms, 7.35** | 528 / 759 ms, 7.29 |
+| 16 | 3,505 / 3,938 ms, 4.54 | **554 / 759 ms, 26.13** | 550 / 766 ms, 26.72 |
+
+With one client, Ollama's 4-bit model is about twice as fast. Ollama's throughput stays flat at
+about 4.5 req/s, so extra clients just queue; vLLM's batching reaches **5.8× Ollama's
+throughput at 16 clients** (1,534 vs 268 tok/s). The crossover is between 1 and 4 clients. The
+gateway adds no measurable cost in front of vLLM.
 
 ### Guardrail latency (i5-13420H, on AC power, 2026-10-02)
 
@@ -546,16 +602,9 @@ time for direct calls is Ollama waking the GPU, not the gateway.
 
 ### Results: Kaggle T4, full GPU power
 
-*Not run yet.* Run [notebooks/kaggle_benchmark.ipynb](notebooks/kaggle_benchmark.ipynb)
-and paste `headline.json` here.
-
-| What | Direct | Gateway | Difference |
-|---|---|---|---|
-| Overhead p50 (1-token) | – | – | – |
-| Load p50 (64-token, 4 clients) | – | – | – |
-| Streaming TTFT p50 | – | – | – |
-| Cache throughput gain (50% repeats) | – | – | – |
-| Failover availability | – | – | – |
+Not run. The desktop runs above replace it as the full-power measurement; the notebook
+([notebooks/kaggle_benchmark.ipynb](notebooks/kaggle_benchmark.ipynb)) is kept for anyone who
+wants to reproduce the numbers on a free GPU.
 
 ## Milestones
 
@@ -592,7 +641,7 @@ Milestones follow [SHARED_STANDARDS.md](../SHARED_STANDARDS.md). Each one has a 
 - [x] Failover harness (`scripts/failover.py`) for killing a backend under load
 - [x] Kaggle notebook to reproduce benchmarks + failover on a free T4 GPU
 - [x] Benchmarks run locally (USB-C, 20 W cap); failover measured (100% availability)
-- [ ] Benchmarks run on Kaggle T4 (full GPU power)
+- [x] Benchmarks at full GPU power (RTX 5070 Ti desktop, instead of Kaggle T4), plus LiteLLM and vLLM comparisons
 
 ### M5: Observability / monitoring
 - [x] Prometheus metrics: TTFT, tokens/sec, p50/p95 latency, cache hit rate, cost
@@ -613,7 +662,7 @@ Milestones follow [SHARED_STANDARDS.md](../SHARED_STANDARDS.md). Each one has a 
 ### M7: Docs, benchmarks & demo
 - [x] README with measured results against the baseline (local, 20 W cap)
 - [x] Benchmark report (latency overhead, cache savings, failover) with raw data
-- [ ] Kaggle full-power numbers added
+- [x] Full-power numbers added (desktop RTX 5070 Ti instead of Kaggle)
 - [x] Scripted demo (`make demo`) with a real run transcript in [docs/demo.md](docs/demo.md)
 - [ ] Screen recording or public deploy (optional)
 
