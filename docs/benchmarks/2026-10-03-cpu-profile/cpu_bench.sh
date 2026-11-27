@@ -1,4 +1,5 @@
 #!/bin/bash
+REPO=${REPO:-$(git rev-parse --show-toplevel)}
 # usage: cpu_bench.sh label extra-bench-args...  (gateway on :8000 must be running)
 label=$1; shift
 . $REPO/.venv/bin/activate

@@ -1,4 +1,5 @@
 #!/bin/bash
+REPO=${REPO:-$(git rev-parse --show-toplevel)}
 . $REPO/.venv/bin/activate
 B=$REPO/scripts/bench.py
 for round in 1 2; do

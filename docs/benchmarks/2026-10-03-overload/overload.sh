@@ -1,4 +1,5 @@
 #!/bin/bash
+REPO=${REPO:-$(git rev-parse --show-toplevel)}
 # Overload experiment: each mock "GPU" runs 4 requests at once x 200 ms = 20 req/s.
 # Client: 64 concurrent users, 2 s timeout (an SLA), 600 requests.
 . $REPO/.venv/bin/activate
