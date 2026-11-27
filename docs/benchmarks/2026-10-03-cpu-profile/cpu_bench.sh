@@ -1,10 +1,10 @@
 #!/bin/bash
 # usage: cpu_bench.sh label extra-bench-args...  (gateway on :8000 must be running)
 label=$1; shift
-. /home/claude/01-llm-gateway/.venv/bin/activate
-GW=$(/tmp/claude-0/prof/gwpid.sh)
+. $REPO/.venv/bin/activate
+GW=$(/tmp/prof/gwpid.sh)
 t0=$(awk '{print $14+$15}' /proc/$GW/stat)
-out=$(python /home/claude/01-llm-gateway/scripts/bench.py --label $label --api-key k --out res.jsonl "$@")
+out=$(python $REPO/scripts/bench.py --label $label --api-key k --out res.jsonl "$@")
 t1=$(awk '{print $14+$15}' /proc/$GW/stat)
 n=$(echo "$out" | awk '/ requests:/{print $2}')
 rps=$(echo "$out" | awk '/throughput_rps/{print $2}')
